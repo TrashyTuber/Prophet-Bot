@@ -35,12 +35,18 @@ def get_market_type(trade):
     weather_hints = ["temp", "weather", "rain", "snow", "heat", "cold", "wind", "storm", "hurricane"]
     econ_hints = ["cpi", "gdp", "inflation", "unemployment", "jobs", "payroll", "fed",
                   "treasury", "yield", "bond", "interest", "retail", "housing"]
+    sports_hints = ["nba", "nfl", "mlb", "nhl", "mls", "wnba", "playoff", "championship",
+                    "finals", "basketball", "football", "baseball",
+                    "hockey", "soccer", "tennis", "golf", "ufc", "boxing"]
     for hint in weather_hints:
         if hint in mid:
             return "weather"
     for hint in econ_hints:
         if hint in mid:
             return "economics"
+    for hint in sports_hints:
+        if hint in mid:
+            return "sports"
     return "general"
 
 
@@ -103,7 +109,7 @@ def report(trades):
     print(f"\n--- By Market Type ---")
     print(f"{'Type':<12} {'Count':>6} {'Avg Edge':>10} {'Notional':>12} {'Est Profit':>12}")
     print(f"{'-'*12} {'-'*6} {'-'*10} {'-'*12} {'-'*12}")
-    for mtype in ["weather", "economics", "general"]:
+    for mtype in ["weather", "economics", "sports", "politics", "entertainment", "general"]:
         group = by_type.get(mtype, [])
         if group:
             avg_e = sum(t["edge"] for t in group) / len(group)

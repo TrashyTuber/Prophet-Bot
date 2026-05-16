@@ -66,12 +66,34 @@ WEATHER_KEYWORDS = [
     "celsius", "fahrenheit", "degrees",
 ]
 
+POLITICS_KEYWORDS = [
+    "election", "president", "congress", "senate", "house of representatives",
+    "democrat", "republican", "gop", "biden", "trump",
+    "governor", "mayor", "vote", "ballot", "poll",
+    "legislation", "bill passed", "executive order",
+    "supreme court", "impeach", "cabinet", "primary",
+    "midterm", "electoral", "political party",
+]
+
+ENTERTAINMENT_KEYWORDS = [
+    "oscar", "emmy", "grammy", "golden globe", "tony award",
+    "box office", "movie", "film", "tv show", "series finale",
+    "album", "song", "billboard", "streaming", "netflix",
+    "disney", "hbo", "spotify", "youtube", "tiktok",
+    "celebrity", "actor", "actress", "singer", "rapper",
+    "reality tv", "bachelor", "survivor", "american idol",
+    "video game", "gaming", "esports",
+]
+
 SPORTS_KEYWORDS = [
-    "nba", "nfl", "mlb", "nhl", "mls", "ufc", "mma", "ncaa",
+    "nba", "nfl", "mlb", "nhl", "mls", "ufc", "mma", "ncaa", "wnba",
     "basketball", "football", "baseball", "hockey", "soccer", "tennis",
     "premier league", "epl", "champions league", "la liga", "serie a",
-    "bundesliga", "game", "match", "playoff", "finals", "championship",
-    "win", "beat", "score", "points", "touchdown", "home run",
+    "bundesliga", "playoff", "finals", "championship",
+    "super bowl", "world series", "stanley cup", "world cup",
+    "touchdown", "home run", "three-pointer", "field goal",
+    "quarterback", "pitcher", "goalkeeper", "striker",
+    "halftime", "inning", "overtime", "penalty kick",
     "lakers", "celtics", "warriors", "yankees", "dodgers", "chiefs",
     "eagles", "cowboys", "patriots", "49ers",
 ]
@@ -120,8 +142,16 @@ def _classify_market(market):
         if keyword in question_lower or keyword in topic:
             return "economics"
 
+    for keyword in POLITICS_KEYWORDS:
+        if keyword in question_lower or keyword in topic or keyword in family:
+            return "politics"
+
+    for keyword in ENTERTAINMENT_KEYWORDS:
+        if keyword in question_lower or keyword in topic or keyword in family:
+            return "entertainment"
+
     for keyword in SPORTS_KEYWORDS:
-        if keyword in question_lower or keyword in topic:
+        if keyword in question_lower or keyword in topic or keyword in family:
             return "sports"
 
     return "general"
@@ -424,6 +454,10 @@ def analyze_market(market):
         return None
 
     market_type = _classify_market(market)
+
+    if market_type in ("general", "politics", "entertainment"):
+        log.info("[STRATEGY] SKIP %s type=%s — no data advantage", market.market_id, market_type)
+        return None
 
     external_data = None
 
