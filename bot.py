@@ -28,10 +28,12 @@ CONFIG_HASH = hashlib.sha256(
 STARTING_CASH = 10_000
 KELLY_FRACTION = 0.25
 MAX_CASH_PCT_PER_TRADE = 0.05
-MAX_SINGLE_MARKET_PCT = 0.15
+MAX_NOTIONAL_PER_MARKET = 1_000
 MAX_TOTAL_DEPLOYED_PCT = 0.70
 MAX_EXISTING_POSITION_PCT = 0.10
+MAX_INTENTS_PER_TICK = 10
 STOP_LOSS_PCT = -0.30
+TAKE_PROFIT_PCT = 0.20
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
     "timestamp", "market_id", "market_type", "action", "side", "shares",
@@ -74,7 +76,7 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="claude-bot-v2",
+            slug="claude-bot-v8",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
             n_ticks=96,
@@ -120,6 +122,7 @@ def run():
 
             intents = []
             trade_records = []
+            buy_candidates = []
             for market in markets:
                 existing_pos = positions_by_market.get(market.market_id)
 
@@ -127,10 +130,11 @@ def run():
                     entry_cost = float(existing_pos.shares) * float(existing_pos.avg_entry_price)
                     if entry_cost > 0:
                         pnl_pct = float(existing_pos.unrealized_pnl) / entry_cost
-                        if pnl_pct <= STOP_LOSS_PCT:
+                        if pnl_pct <= STOP_LOSS_PCT or pnl_pct >= TAKE_PROFIT_PCT:
                             sell_shares = int(float(existing_pos.shares))
-                            log.info("  STOP-LOSS SELL %s %d shares on %s (pnl=%.0f%%)",
-                                     existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
+                            reason = "STOP-LOSS" if pnl_pct < 0 else "TAKE-PROFIT"
+                            log.info("  %s SELL %s %d shares on %s (pnl=%.0f%%)",
+                                     reason, existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
                             intents.append(TradeIntentRequest(
                                 market_id=market.market_id,
                                 action="SELL",
@@ -153,6 +157,9 @@ def run():
                                 "notional": "",
                             })
                             continue
+
+                if total_deployed / equity >= MAX_TOTAL_DEPLOYED_PCT:
+                    continue
 
                 try:
                     decision = analyze_market(market)
@@ -199,6 +206,22 @@ def run():
                     log.info("  SKIP %s %s on %s (edge=%.2f) — sized to 0 shares", action, side, market.market_id, edge)
                     continue
 
+                family = getattr(market, "family", None) or market.market_id
+                buy_candidates.append((market, action, side, edge, shares, family))
+
+            # Deduplicate: keep only the best edge per family
+            best_by_family = {}
+            for candidate in buy_candidates:
+                market, action, side, edge, shares, family = candidate
+                if family not in best_by_family or edge > best_by_family[family][3]:
+                    if family in best_by_family:
+                        log.info("  FAMILY SKIP %s — replaced by %s (edge=%.2f > %.2f)",
+                                 best_by_family[family][0].market_id, market.market_id, edge, best_by_family[family][3])
+                    best_by_family[family] = candidate
+                else:
+                    log.info("  FAMILY SKIP %s — better edge in %s", market.market_id, best_by_family[family][0].market_id)
+
+            for market, action, side, edge, shares, family in sorted(best_by_family.values(), key=lambda x: -x[3]):
                 cost = float(market.quote.best_ask) if side == "YES" else 1.0 - float(market.quote.best_bid)
                 proposed_notional = shares * cost
                 existing_mv = position_value.get(market.market_id, 0.0)
@@ -207,13 +230,17 @@ def run():
                     log.info("  RISK SKIP %s — total deployment would exceed %.0f%%", market.market_id, MAX_TOTAL_DEPLOYED_PCT * 100)
                     continue
 
-                if (existing_mv + proposed_notional) / equity > MAX_SINGLE_MARKET_PCT:
-                    log.info("  RISK SKIP %s — single market exposure would exceed %.0f%%", market.market_id, MAX_SINGLE_MARKET_PCT * 100)
+                if (existing_mv + proposed_notional) > MAX_NOTIONAL_PER_MARKET:
+                    log.info("  RISK SKIP %s — would exceed $%d per-market limit", market.market_id, MAX_NOTIONAL_PER_MARKET)
                     continue
 
                 if existing_mv / equity > MAX_EXISTING_POSITION_PCT:
                     log.info("  RISK SKIP %s — existing position already %.0f%% of equity", market.market_id, existing_mv / equity * 100)
                     continue
+
+                if len(intents) >= MAX_INTENTS_PER_TICK:
+                    log.info("  RISK SKIP %s — already at %d intents (max per tick)", market.market_id, MAX_INTENTS_PER_TICK)
+                    break
 
                 total_deployed += proposed_notional
 
@@ -223,7 +250,7 @@ def run():
                 else:
                     estimated_prob = float(market.quote.best_bid) - edge
 
-                log.info("  TRADE %s %s %d shares on %s (edge=%.2f)", action, side, shares, market.market_id, edge)
+                log.info("  TRADE %s %s %d shares on %s (edge=%.2f, family=%s)", action, side, shares, market.market_id, edge, family)
                 intents.append(TradeIntentRequest(
                     market_id=market.market_id,
                     action=action,

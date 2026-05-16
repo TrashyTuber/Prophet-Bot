@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 EDGE_THRESHOLD_DEFAULT = 0.10
 EDGE_THRESHOLD_WITH_DATA = 0.05
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
+MAX_DAYS_TO_RESOLUTION = 30
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
 client = OpenAI(
@@ -31,7 +32,7 @@ _http_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
-NEWS_DAYS_THRESHOLD = 3.0
+NEWS_DAYS_THRESHOLD = 14.0
 CACHE_PRICE_TOLERANCE = 0.02
 
 _estimate_cache = {}
@@ -364,11 +365,14 @@ def analyze_market(market):
     no_ask = 1.0 - float(market.quote.best_bid)
     implied_prob = yes_ask
 
-    market_type = _classify_market(market)
-
-    if market_type == "general":
-        log.info("[STRATEGY] %s type=general — skipping (no data advantage)", market.market_id)
+    now = datetime.now(timezone.utc)
+    days_left = (market.resolution_time - now).total_seconds() / 86400
+    if days_left > MAX_DAYS_TO_RESOLUTION:
+        log.info("[STRATEGY] SKIP %s — resolves in %.0f days (max %d)",
+                 market.market_id, days_left, MAX_DAYS_TO_RESOLUTION)
         return None
+
+    market_type = _classify_market(market)
 
     external_data = None
 
@@ -379,8 +383,6 @@ def analyze_market(market):
     elif market_type == "weather":
         external_data = _fetch_weather_data(market.question)
 
-    now = datetime.now(timezone.utc)
-    days_left = (market.resolution_time - now).total_seconds() / 86400
     news = _fetch_news(market.question, days_left)
     if news:
         external_data = f"{external_data}\n\n{news}" if external_data else news
@@ -407,21 +409,30 @@ def analyze_market(market):
             {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
         ] + cached_examples + [{"role": "user", "content": user_msg}]
 
-        response = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            max_tokens=256,
-            messages=messages,
-        )
+        estimated_prob = None
+        reasoning = ""
+        for attempt in range(2):
+            try:
+                response = client.chat.completions.create(
+                    model=OPENROUTER_MODEL,
+                    max_tokens=256,
+                    messages=messages,
+                )
 
-        text = response.choices[0].message.content.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        match = re.search(r'\{[^}]+\}', text)
-        if match:
-            text = match.group(0)
-        result = json.loads(text)
-        estimated_prob = float(result["probability"])
-        reasoning = result.get("reasoning", "")
+                text = response.choices[0].message.content.strip()
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                match = re.search(r'\{[^}]+\}', text)
+                if match:
+                    text = match.group(0)
+                result = json.loads(text)
+                estimated_prob = float(result["probability"])
+                reasoning = result.get("reasoning", "")
+                break
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                log.warning("[STRATEGY] Parse error on %s (attempt %d): %s", market.market_id, attempt + 1, e)
+                if attempt == 1:
+                    return None
 
         _estimate_cache[market.market_id] = {
             "implied_prob": implied_prob,
