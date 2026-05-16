@@ -16,9 +16,9 @@ log = logging.getLogger(__name__)
 EDGE_THRESHOLD_DEFAULT = 0.10
 EDGE_THRESHOLD_WITH_DATA = 0.05
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
-MODEL = "anthropic/claude-sonnet-4.6"
+OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
-client = OpenAI(
+client = openai.OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.environ.get("OPENROUTER_API_KEY"),
 )
