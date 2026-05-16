@@ -409,21 +409,30 @@ def analyze_market(market):
             {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
         ] + cached_examples + [{"role": "user", "content": user_msg}]
 
-        response = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            max_tokens=256,
-            messages=messages,
-        )
+        estimated_prob = None
+        reasoning = ""
+        for attempt in range(2):
+            try:
+                response = client.chat.completions.create(
+                    model=OPENROUTER_MODEL,
+                    max_tokens=256,
+                    messages=messages,
+                )
 
-        text = response.choices[0].message.content.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        match = re.search(r'\{[^}]+\}', text)
-        if match:
-            text = match.group(0)
-        result = json.loads(text)
-        estimated_prob = float(result["probability"])
-        reasoning = result.get("reasoning", "")
+                text = response.choices[0].message.content.strip()
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                match = re.search(r'\{[^}]+\}', text)
+                if match:
+                    text = match.group(0)
+                result = json.loads(text)
+                estimated_prob = float(result["probability"])
+                reasoning = result.get("reasoning", "")
+                break
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                log.warning("[STRATEGY] Parse error on %s (attempt %d): %s", market.market_id, attempt + 1, e)
+                if attempt == 1:
+                    return None
 
         _estimate_cache[market.market_id] = {
             "implied_prob": implied_prob,
