@@ -1,6 +1,6 @@
 """Fetch sports data from The Odds API and free stats APIs.
 
-Provides consensus bookmaker odds, recent team stats, and head-to-head records
+Provides consensus bookmaker odds, recent team stats, and power ratings
 for sports prediction markets.
 
 Requires THE_ODDS_API_KEY in environment (free at https://the-odds-api.com).
@@ -8,7 +8,7 @@ Requires THE_ODDS_API_KEY in environment (free at https://the-odds-api.com).
 
 import logging
 import os
-import re
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -17,6 +17,11 @@ log = logging.getLogger(__name__)
 
 ODDS_API_KEY = os.environ.get("THE_ODDS_API_KEY")
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
+ODDS_CACHE_TTL = 4 * 3600  # 4 hours — championship odds barely move
+
+_odds_cache: dict[str, tuple[float, list]] = {}  # sport_key -> (timestamp, events)
+_nba_ratings_cache: tuple[float, dict] | None = None
+NBA_RATINGS_TTL = 6 * 3600
 
 SPORT_KEYWORDS = {
     "nba": {
@@ -111,6 +116,10 @@ SPORT_KEYWORDS = {
         "odds_key": "americanfootball_ncaaf",
         "label": "NCAA Football",
     },
+    "world cup": {
+        "odds_key": "soccer_fifa_world_cup",
+        "label": "FIFA World Cup",
+    },
 }
 
 NBA_TEAMS = {
@@ -149,6 +158,32 @@ NBA_TEAMS = {
     "pistons": "Detroit Pistons",
     "hornets": "Charlotte Hornets",
     "wizards": "Washington Wizards",
+}
+
+NBA_TEAM_ABBREVS = {
+    "ATL": "Atlanta Hawks", "BOS": "Boston Celtics", "BKN": "Brooklyn Nets",
+    "CHA": "Charlotte Hornets", "CHI": "Chicago Bulls", "CLE": "Cleveland Cavaliers",
+    "DAL": "Dallas Mavericks", "DEN": "Denver Nuggets", "DET": "Detroit Pistons",
+    "GSW": "Golden State Warriors", "HOU": "Houston Rockets", "IND": "Indiana Pacers",
+    "LAC": "Los Angeles Clippers", "LAL": "Los Angeles Lakers", "MEM": "Memphis Grizzlies",
+    "MIA": "Miami Heat", "MIL": "Milwaukee Bucks", "MIN": "Minnesota Timberwolves",
+    "NOP": "New Orleans Pelicans", "NYK": "New York Knicks", "OKC": "Oklahoma City Thunder",
+    "ORL": "Orlando Magic", "PHI": "Philadelphia 76ers", "PHX": "Phoenix Suns",
+    "POR": "Portland Trail Blazers", "SAC": "Sacramento Kings", "SAS": "San Antonio Spurs",
+    "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
+}
+NBA_FULLNAME_TO_ABBREV = {v: k for k, v in NBA_TEAM_ABBREVS.items()}
+
+NBA_CONFERENCES = {
+    "East": ["Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets",
+             "Chicago Bulls", "Cleveland Cavaliers", "Detroit Pistons", "Indiana Pacers",
+             "Miami Heat", "Milwaukee Bucks", "New York Knicks", "Orlando Magic",
+             "Philadelphia 76ers", "Toronto Raptors", "Washington Wizards"],
+    "West": ["Dallas Mavericks", "Denver Nuggets", "Golden State Warriors", "Houston Rockets",
+             "Los Angeles Clippers", "Los Angeles Lakers", "Memphis Grizzlies",
+             "Minnesota Timberwolves", "New Orleans Pelicans", "Oklahoma City Thunder",
+             "Phoenix Suns", "Portland Trail Blazers", "Sacramento Kings",
+             "San Antonio Spurs", "Utah Jazz"],
 }
 
 MLB_TEAMS = {
@@ -257,16 +292,17 @@ def _american_odds_to_implied_prob(odds: int) -> float:
         return abs(odds) / (abs(odds) + 100)
 
 
-def _decimal_odds_to_implied_prob(odds: float) -> float:
-    if odds <= 1.0:
-        return 1.0
-    return 1.0 / odds
+def _fetch_odds_raw(sport_key: str) -> list:
+    """Fetch raw odds events for a sport key, with caching."""
+    now = time.time()
+    cached = _odds_cache.get(sport_key)
+    if cached and (now - cached[0]) < ODDS_CACHE_TTL:
+        log.debug("Odds cache hit for %s (age=%.0fm)", sport_key, (now - cached[0]) / 60)
+        return cached[1]
 
-
-def _fetch_odds(sport_key: str, teams: list[str]) -> str | None:
     if not ODDS_API_KEY:
         log.warning("THE_ODDS_API_KEY not set — skipping odds fetch")
-        return None
+        return []
 
     try:
         resp = httpx.get(
@@ -281,10 +317,18 @@ def _fetch_odds(sport_key: str, teams: list[str]) -> str | None:
         )
         resp.raise_for_status()
         events = resp.json()
+        remaining = resp.headers.get("x-requests-remaining", "?")
+        log.info("Odds API: fetched %s (%d events, %s requests remaining)", sport_key, len(events), remaining)
     except Exception as e:
         log.warning("Odds API error for %s: %s", sport_key, e)
-        return None
+        return cached[1] if cached else []
 
+    _odds_cache[sport_key] = (now, events)
+    return events
+
+
+def _format_odds(events: list, teams: list[str]) -> str | None:
+    """Format odds events into a readable string, filtering for relevant teams."""
     if not events:
         return None
 
@@ -327,7 +371,6 @@ def _fetch_odds(sport_key: str, teams: list[str]) -> str | None:
         totals_data = {}
 
         for bm in bookmakers[:6]:
-            bm_name = bm.get("title", "Unknown")
             for market in bm.get("markets", []):
                 mkey = market.get("key")
                 outcomes = market.get("outcomes", [])
@@ -378,53 +421,200 @@ def _fetch_odds(sport_key: str, teams: list[str]) -> str | None:
     return "\n".join(lines) if lines else None
 
 
-def _fetch_nba_stats(teams: list[str]) -> str | None:
-    """Fetch recent NBA game results from BallDontLie API (free, no key)."""
-    if not teams:
-        return None
+# ---------------------------------------------------------------------------
+# NBA Power Ratings — built from BallDontLie season stats (free, no key needed)
+# ---------------------------------------------------------------------------
 
+def _fetch_nba_power_ratings() -> dict[str, dict] | None:
+    """Build NBA power ratings from current season standings and recent games.
+
+    Returns a dict of team_name -> {
+        wins, losses, win_pct, net_rating, recent_form, power_score, championship_prob
+    }
+    """
+    global _nba_ratings_cache
+    now = time.time()
+    if _nba_ratings_cache and (now - _nba_ratings_cache[0]) < NBA_RATINGS_TTL:
+        return _nba_ratings_cache[1]
+
+    bdl_key = os.environ.get("BALLDONTLIE_API_KEY", "")
+    headers = {"Authorization": bdl_key} if bdl_key else {}
+
+    # Fetch current season standings
     try:
         resp = httpx.get(
-            "https://api.balldontlie.io/v1/games",
-            params={
-                "per_page": 10,
-                "dates[]": [],
-            },
-            headers={"Authorization": os.environ.get("BALLDONTLIE_API_KEY", "")},
-            timeout=10,
+            "https://api.balldontlie.io/v1/season_averages",
+            params={"season": 2025},
+            headers=headers,
+            timeout=15,
         )
-        if resp.status_code != 200:
-            return None
-        games = resp.json().get("data", [])
     except Exception as e:
-        log.debug("BallDontLie API error: %s", e)
+        log.debug("BallDontLie season_averages failed: %s", e)
+
+    # Fetch recent games to compute team records and net ratings
+    team_stats: dict[str, dict] = {}
+    for page in range(1, 4):
+        try:
+            resp = httpx.get(
+                "https://api.balldontlie.io/v1/games",
+                params={
+                    "seasons[]": 2025,
+                    "per_page": 100,
+                    "cursor": (page - 1) * 100 if page > 1 else 0,
+                    "postseason": "true",
+                },
+                headers=headers,
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                log.debug("BallDontLie games page %d: status %d", page, resp.status_code)
+                break
+            data = resp.json()
+            games = data.get("data", [])
+            if not games:
+                break
+
+            for game in games:
+                home_name = game.get("home_team", {}).get("full_name", "")
+                away_name = game.get("visitor_team", {}).get("full_name", "")
+                home_score = game.get("home_team_score", 0)
+                away_score = game.get("visitor_team_score", 0)
+
+                if not home_score and not away_score:
+                    continue
+
+                for name, pts_for, pts_against, is_home in [
+                    (home_name, home_score, away_score, True),
+                    (away_name, away_score, home_score, False),
+                ]:
+                    if name not in team_stats:
+                        team_stats[name] = {
+                            "wins": 0, "losses": 0,
+                            "pts_for": 0, "pts_against": 0,
+                            "games": 0, "recent_scores": [],
+                        }
+                    ts = team_stats[name]
+                    ts["games"] += 1
+                    ts["pts_for"] += pts_for
+                    ts["pts_against"] += pts_against
+                    if pts_for > pts_against:
+                        ts["wins"] += 1
+                    else:
+                        ts["losses"] += 1
+                    ts["recent_scores"].append(pts_for - pts_against)
+
+        except Exception as e:
+            log.debug("BallDontLie games fetch error: %s", e)
+            break
+
+    if not team_stats:
         return None
 
-    if not games:
+    ratings = {}
+    all_net = []
+    for name, ts in team_stats.items():
+        if ts["games"] == 0:
+            continue
+        net_rating = (ts["pts_for"] - ts["pts_against"]) / ts["games"]
+        win_pct = ts["wins"] / ts["games"] if ts["games"] > 0 else 0.5
+        recent = ts["recent_scores"][-10:]
+        recent_form = sum(1 for s in recent if s > 0) / len(recent) if recent else 0.5
+
+        ratings[name] = {
+            "wins": ts["wins"],
+            "losses": ts["losses"],
+            "win_pct": win_pct,
+            "net_rating": net_rating,
+            "recent_form": recent_form,
+            "games": ts["games"],
+        }
+        all_net.append(net_rating)
+
+    if not ratings:
         return None
 
-    relevant = []
-    for game in games:
-        home = game.get("home_team", {}).get("full_name", "")
-        away = game.get("visitor_team", {}).get("full_name", "")
-        if any(t in home or t in away for t in teams):
-            relevant.append(game)
+    # Compute power scores and championship probabilities
+    # Power score = weighted combo of win%, net rating (normalized), and recent form
+    min_net = min(all_net)
+    max_net = max(all_net)
+    net_range = max_net - min_net if max_net != min_net else 1.0
 
-    if not relevant:
+    for name, r in ratings.items():
+        norm_net = (r["net_rating"] - min_net) / net_range
+        r["power_score"] = 0.4 * r["win_pct"] + 0.4 * norm_net + 0.2 * r["recent_form"]
+
+    # Convert power scores to championship probabilities via softmax
+    import math
+    TEMP = 8.0  # higher = more spread out, lower = winner-take-all
+    power_scores = {name: r["power_score"] for name, r in ratings.items()}
+    max_score = max(power_scores.values())
+    exp_scores = {name: math.exp(TEMP * (score - max_score)) for name, score in power_scores.items()}
+    total_exp = sum(exp_scores.values())
+
+    for name in ratings:
+        ratings[name]["championship_prob"] = exp_scores[name] / total_exp
+
+    _nba_ratings_cache = (now, ratings)
+    return ratings
+
+
+def _format_nba_ratings(teams: list[str], question: str) -> str | None:
+    """Format NBA power ratings for specific teams or as a league overview."""
+    ratings = _fetch_nba_power_ratings()
+    if not ratings:
         return None
 
-    lines = ["Recent games:"]
-    for game in relevant[:5]:
-        home = game.get("home_team", {}).get("full_name", "")
-        away = game.get("visitor_team", {}).get("full_name", "")
-        home_score = game.get("home_team_score", 0)
-        away_score = game.get("visitor_team_score", 0)
-        date = game.get("date", "")[:10]
-        status = game.get("status", "")
-        if home_score or away_score:
-            lines.append(f"  {date}: {away} {away_score} @ {home} {home_score} ({status})")
+    question_lower = question.lower()
+    is_conference = "east" in question_lower or "west" in question_lower
+    conference = "East" if "east" in question_lower else "West" if "west" in question_lower else None
 
-    return "\n".join(lines) if len(lines) > 1 else None
+    if conference:
+        conf_teams = NBA_CONFERENCES.get(conference, [])
+        filtered = {k: v for k, v in ratings.items() if k in conf_teams}
+    elif teams:
+        filtered = {k: v for k, v in ratings.items() if k in teams}
+    else:
+        filtered = ratings
+
+    if not filtered:
+        return None
+
+    sorted_teams = sorted(filtered.items(), key=lambda x: -x[1]["power_score"])
+
+    scope = f" ({conference}ern Conference)" if conference else ""
+    lines = [f"NBA Power Ratings{scope} — from season game data:"]
+    lines.append(f"{'Team':<28} {'W-L':<8} {'Win%':<6} {'NetRtg':<8} {'Form':<6} {'Power':<6} {'Champ%':<7}")
+
+    # Recompute conference championship probs if needed
+    if conference:
+        import math
+        TEMP = 8.0
+        power_scores = {name: r["power_score"] for name, r in filtered.items()}
+        max_score = max(power_scores.values()) if power_scores else 0
+        exp_scores = {name: math.exp(TEMP * (score - max_score)) for name, score in power_scores.items()}
+        total_exp = sum(exp_scores.values()) if exp_scores else 1
+        conf_probs = {name: exp_scores[name] / total_exp for name in filtered}
+    else:
+        conf_probs = None
+
+    for name, r in sorted_teams[:15]:
+        prob = conf_probs[name] if conf_probs else r["championship_prob"]
+        lines.append(
+            f"  {name:<26} {r['wins']}-{r['losses']:<5} "
+            f"{r['win_pct']:.3f} {r['net_rating']:>+7.1f} "
+            f"{r['recent_form']:.2f}  {r['power_score']:.3f} "
+            f"{prob:.1%}"
+        )
+
+    if teams and len(teams) == 1:
+        team = teams[0]
+        if team in ratings:
+            r = ratings[team]
+            prob = conf_probs[team] if conf_probs and team in conf_probs else r["championship_prob"]
+            lines.append(f"\nModel estimate for {team}: {prob:.1%} chance to win" +
+                         (f" {conference}ern Conference" if conference else " championship"))
+
+    return "\n".join(lines)
 
 
 def is_sports_market(question: str) -> bool:
@@ -447,14 +637,15 @@ def fetch_sports_context(question: str) -> str | None:
 
     sections = [f"Sports data for {label}:"]
 
-    odds_data = _fetch_odds(sport_key, teams)
+    events = _fetch_odds_raw(sport_key)
+    odds_data = _format_odds(events, teams)
     if odds_data:
         sections.append(f"\nBookmaker consensus odds:{odds_data}")
 
-    if sport_info["odds_key"] == "basketball_nba" and teams:
-        stats = _fetch_nba_stats(teams)
-        if stats:
-            sections.append(f"\n{stats}")
+    if sport_key == "basketball_nba":
+        nba_ratings = _format_nba_ratings(teams, question)
+        if nba_ratings:
+            sections.append(f"\n{nba_ratings}")
 
     if len(sections) == 1:
         return None
