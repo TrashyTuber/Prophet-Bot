@@ -49,8 +49,11 @@ def analyze_market(market):
         market.market_id, implied_prob, estimated_prob, reasoning,
     )
 
-    if estimated_prob > implied_prob + EDGE_THRESHOLD:
-        return ("BUY", "YES")
-    elif estimated_prob < (1.0 - no_ask) - EDGE_THRESHOLD:
-        return ("BUY", "NO")
+    yes_edge = estimated_prob - implied_prob
+    no_edge = (1.0 - no_ask) - estimated_prob
+
+    if yes_edge > EDGE_THRESHOLD:
+        return ("BUY", "YES", yes_edge)
+    elif no_edge > EDGE_THRESHOLD:
+        return ("BUY", "NO", no_edge)
     return None
