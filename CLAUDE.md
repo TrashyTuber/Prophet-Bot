@@ -16,13 +16,16 @@ source venv/bin/activate
 python bot.py
 ```
 
-Requires a `.env` with `PA_API_KEY` and (optionally) `PA_SERVER_URL`. The Anthropic API key must also be set (`ANTHROPIC_API_KEY`) for the Claude-based strategy.
+Requires a `.env` with `PA_SERVER_API_KEY` and (optionally) `PA_SERVER_URL`. The Anthropic API key must also be set (`ANTHROPIC_API_KEY`) for the Claude-based strategy. For economics data, set `FRED_API_KEY` (free from https://fred.stlouisfed.org/docs/api/api_key.html).
 
 ## Architecture
 
-- **bot.py** — Entry point. Fetches a `MarketSnapshot` from the Prophet Arena API, iterates over markets, and feeds them into `BettingEngine.process_forecasts()`. Currently uses `ClaudeStrategy`.
-- **strategy.py** — Intended home for custom `BettingStrategy` subclasses (currently empty).
-- **ai_prophet_core** (installed package, v0.1.5) — Provides `ServerAPIClient`, `BettingEngine`, `BettingStrategy` (ABC), `BetSignal`, and related types. Not editable in this repo.
+- **bot.py** — Entry point. Runs the tick loop: claims ticks, loads candidate markets, runs strategy, submits trade intents.
+- **strategy.py** — Market classifier + Claude-powered analysis. Filters to weather/economics markets only, enriches prompts with external data.
+- **data/** — Data fetchers for external sources:
+  - `weather.py` — Open-Meteo API (free, no key) for temperature/precip/wind forecasts
+  - `economics.py` — FRED API for CPI, GDP, unemployment, Fed funds, etc.
+- **ai_prophet_core** (installed package, v0.1.5) — Provides `ServerAPIClient`, `BenchmarkSession`, `TradeIntentRequest`, and related types. Not editable in this repo.
 
 ### Strategy Interface
 

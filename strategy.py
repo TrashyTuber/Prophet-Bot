@@ -10,6 +10,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tavily import TavilyClient
 from dotenv import load_dotenv
+from data.sports import fetch_sports_context
 
 load_dotenv(override=True)
 
@@ -18,6 +19,7 @@ log = logging.getLogger(__name__)
 EDGE_THRESHOLD_DEFAULT = 0.10
 EDGE_THRESHOLD_WITH_DATA = 0.05
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
+EDGE_THRESHOLD_SPORTS_WITH_DATA = 0.04
 MAX_DAYS_TO_RESOLUTION = 30
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
@@ -64,6 +66,16 @@ WEATHER_KEYWORDS = [
     "celsius", "fahrenheit", "degrees",
 ]
 
+SPORTS_KEYWORDS = [
+    "nba", "nfl", "mlb", "nhl", "mls", "ufc", "mma", "ncaa",
+    "basketball", "football", "baseball", "hockey", "soccer", "tennis",
+    "premier league", "epl", "champions league", "la liga", "serie a",
+    "bundesliga", "game", "match", "playoff", "finals", "championship",
+    "win", "beat", "score", "points", "touchdown", "home run",
+    "lakers", "celtics", "warriors", "yankees", "dodgers", "chiefs",
+    "eagles", "cowboys", "patriots", "49ers",
+]
+
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 
@@ -107,6 +119,10 @@ def _classify_market(market):
     for keyword in ECON_KEYWORDS:
         if keyword in question_lower or keyword in topic:
             return "economics"
+
+    for keyword in SPORTS_KEYWORDS:
+        if keyword in question_lower or keyword in topic:
+            return "sports"
 
     return "general"
 
@@ -277,7 +293,11 @@ it as primary evidence rather than relying on priors.
 Avoid the extremes (< 0.05 or > 0.95) unless the evidence is overwhelming.
 - Account for the time remaining until resolution. More time = more uncertainty.
 - If recent news headlines are provided, check for breaking developments that \
-could shift the outcome. News near resolution is especially high-signal.\
+could shift the outcome. News near resolution is especially high-signal.
+- For sports markets: bookmaker consensus odds are the strongest signal. \
+Sportsbooks are extremely well-calibrated. If the prediction market price \
+diverges significantly from bookmaker implied probability, trust the books. \
+Spreads and totals provide additional context for over/under and margin markets.\
 """
 
 FEW_SHOT_EXAMPLES = [
@@ -331,6 +351,37 @@ FEW_SHOT_EXAMPLES = [
             'significantly underprices this — strong YES edge."}'
         ),
     },
+    {
+        "role": "user",
+        "content": (
+            "Market: Will the Lakers beat the Celtics in their next matchup?\n"
+            "Current YES price (implied probability): 0.55\n"
+            "Resolution: 2026-05-20\n\n"
+            "External data:\n"
+            "Sports data for NBA:\n\n"
+            "Bookmaker consensus odds:\n"
+            "Boston Celtics @ Los Angeles Lakers — 2026-05-19 02:00 UTC\n"
+            "  Moneyline (consensus from multiple books):\n"
+            "    Los Angeles Lakers: avg +130 (implied 43.5%) [5 books]\n"
+            "    Boston Celtics: avg -155 (implied 60.8%) [5 books]\n"
+            "  Spread:\n"
+            "    Los Angeles Lakers: +3.5\n"
+            "    Boston Celtics: -3.5\n"
+            "  Total (O/U): 218.5\n\n"
+            "Respond with ONLY a JSON object:\n"
+            '{"probability": <float 0-1>, "reasoning": "brief explanation"}'
+        ),
+    },
+    {
+        "role": "assistant",
+        "content": (
+            '{"probability": 0.42, "reasoning": "Bookmaker consensus has Lakers '
+            "as +130 underdogs (implied 43.5% win probability) with a 3.5-point "
+            "spread favoring Boston. The prediction market at 0.55 significantly "
+            "overprices the Lakers. Sportsbooks are well-calibrated on NBA — "
+            'trust their line over the market here."}'
+        ),
+    },
 ]
 
 
@@ -382,6 +433,8 @@ def analyze_market(market):
             external_data = _fetch_fred_data(series)
     elif market_type == "weather":
         external_data = _fetch_weather_data(market.question)
+    elif market_type == "sports":
+        external_data = fetch_sports_context(market.question)
 
     news = _fetch_news(market.question, days_left)
     if news:
@@ -447,6 +500,8 @@ def analyze_market(market):
 
     if market_type == "weather" and external_data:
         threshold = EDGE_THRESHOLD_WEATHER_WITH_DATA
+    elif market_type == "sports" and external_data:
+        threshold = EDGE_THRESHOLD_SPORTS_WITH_DATA
     elif external_data:
         threshold = EDGE_THRESHOLD_WITH_DATA
     else:
