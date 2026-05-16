@@ -7,6 +7,7 @@ Requires THE_ODDS_API_KEY in environment (free at https://the-odds-api.com).
 """
 
 import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -20,8 +21,8 @@ ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
 ODDS_CACHE_TTL = 4 * 3600  # 4 hours — championship odds barely move
 
 _odds_cache: dict[str, tuple[float, list]] = {}  # sport_key -> (timestamp, events)
-_nba_ratings_cache: tuple[float, dict] | None = None
-NBA_RATINGS_TTL = 6 * 3600
+_ratings_cache: dict[str, tuple[float, dict]] = {}  # "nba"/"nhl"/"mlb" -> (timestamp, ratings)
+RATINGS_TTL = 6 * 3600
 
 SPORT_KEYWORDS = {
     "nba": {
@@ -257,7 +258,45 @@ NFL_TEAMS = {
     "bucs": "Tampa Bay Buccaneers",
 }
 
-ALL_TEAMS = {**NBA_TEAMS, **MLB_TEAMS, **NFL_TEAMS}
+NHL_TEAMS = {
+    "avalanche": "Colorado Avalanche",
+    "jets": "Winnipeg Jets",
+    "hurricanes": "Carolina Hurricanes",
+    "panthers": "Florida Panthers",
+    "stars": "Dallas Stars",
+    "oilers": "Edmonton Oilers",
+    "maple leafs": "Toronto Maple Leafs",
+    "leafs": "Toronto Maple Leafs",
+    "bruins": "Boston Bruins",
+    "wild": "Minnesota Wild",
+    "lightning": "Tampa Bay Lightning",
+    "canucks": "Vancouver Canucks",
+    "blue jackets": "Columbus Blue Jackets",
+    "predators": "Nashville Predators",
+    "preds": "Nashville Predators",
+    "flames": "Calgary Flames",
+    "golden knights": "Vegas Golden Knights",
+    "penguins": "Pittsburgh Penguins",
+    "red wings": "Detroit Red Wings",
+    "sabres": "Buffalo Sabres",
+    "canadiens": "Montréal Canadiens",
+    "habs": "Montréal Canadiens",
+    "senators": "Ottawa Senators",
+    "sens": "Ottawa Senators",
+    "kraken": "Seattle Kraken",
+    "islanders": "New York Islanders",
+    "blackhawks": "Chicago Blackhawks",
+    "ducks": "Anaheim Ducks",
+    "coyotes": "Utah Hockey Club",
+    "blues": "St. Louis Blues",
+    "sharks": "San Jose Sharks",
+    "devils": "New Jersey Devils",
+    "flyers": "Philadelphia Flyers",
+    "capitals": "Washington Capitals",
+    "caps": "Washington Capitals",
+}
+
+ALL_TEAMS = {**NBA_TEAMS, **MLB_TEAMS, **NFL_TEAMS, **NHL_TEAMS}
 
 
 def _detect_sport(question: str) -> dict | None:
@@ -273,6 +312,8 @@ def _detect_sport(question: str) -> dict | None:
                 return SPORT_KEYWORDS["mlb"]
             if team in NFL_TEAMS:
                 return SPORT_KEYWORDS["nfl"]
+            if team in NHL_TEAMS:
+                return SPORT_KEYWORDS["nhl"]
     return None
 
 
@@ -422,36 +463,133 @@ def _format_odds(events: list, teams: list[str]) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# NBA Power Ratings — built from BallDontLie season stats (free, no key needed)
+# Shared power rating computation
+# ---------------------------------------------------------------------------
+
+SOFTMAX_TEMP = 8.0
+
+
+def _compute_power_scores(ratings: dict[str, dict]) -> None:
+    """Add power_score and championship_prob to each team's rating dict in-place."""
+    all_net = [r["net_rating"] for r in ratings.values()]
+    if not all_net:
+        return
+    min_net = min(all_net)
+    max_net = max(all_net)
+    net_range = max_net - min_net if max_net != min_net else 1.0
+
+    for r in ratings.values():
+        norm_net = (r["net_rating"] - min_net) / net_range
+        r["power_score"] = 0.4 * r["win_pct"] + 0.4 * norm_net + 0.2 * r["recent_form"]
+
+    _apply_softmax_probs(ratings)
+
+
+def _apply_softmax_probs(ratings: dict[str, dict], key: str = "championship_prob") -> dict[str, float]:
+    """Convert power_score to probabilities via softmax. Returns the prob dict."""
+    power_scores = {name: r["power_score"] for name, r in ratings.items()}
+    if not power_scores:
+        return {}
+    max_score = max(power_scores.values())
+    exp_scores = {name: math.exp(SOFTMAX_TEMP * (score - max_score)) for name, score in power_scores.items()}
+    total_exp = sum(exp_scores.values())
+    probs = {}
+    for name in ratings:
+        prob = exp_scores[name] / total_exp
+        ratings[name][key] = prob
+        probs[name] = prob
+    return probs
+
+
+def _get_cached_ratings(sport: str) -> dict[str, dict] | None:
+    cached = _ratings_cache.get(sport)
+    if cached and (time.time() - cached[0]) < RATINGS_TTL:
+        return cached[1]
+    return None
+
+
+def _save_ratings_cache(sport: str, ratings: dict[str, dict]) -> None:
+    _ratings_cache[sport] = (time.time(), ratings)
+
+
+def _format_ratings_table(
+    ratings: dict[str, dict],
+    teams: list[str],
+    question: str,
+    sport_name: str,
+    conferences: dict[str, list[str]] | None = None,
+    diff_label: str = "NetRtg",
+) -> str | None:
+    """Generic formatter for power ratings across sports."""
+    if not ratings:
+        return None
+
+    question_lower = question.lower()
+    conference = None
+    if conferences:
+        for conf_name in conferences:
+            if conf_name.lower() in question_lower:
+                conference = conf_name
+                break
+
+    if conference:
+        conf_teams = conferences.get(conference, [])
+        filtered = {k: v for k, v in ratings.items() if k in conf_teams}
+    elif teams:
+        filtered = {k: v for k, v in ratings.items() if k in teams}
+    else:
+        filtered = ratings
+
+    if not filtered:
+        return None
+
+    sorted_teams = sorted(filtered.items(), key=lambda x: -x[1]["power_score"])
+
+    scope = f" ({conference})" if conference else ""
+    lines = [f"{sport_name} Power Ratings{scope} — from season data:"]
+    lines.append(f"{'Team':<28} {'W-L':<8} {'Win%':<6} {diff_label:<8} {'Form':<6} {'Power':<6} {'Champ%':<7}")
+
+    if conference:
+        scoped_ratings = {k: dict(v) for k, v in filtered.items()}
+        _apply_softmax_probs(scoped_ratings)
+        conf_probs = {name: r["championship_prob"] for name, r in scoped_ratings.items()}
+    else:
+        conf_probs = None
+
+    for name, r in sorted_teams[:15]:
+        prob = conf_probs[name] if conf_probs else r["championship_prob"]
+        record = f"{r['wins']}-{r['losses']}"
+        if "otl" in r:
+            record += f"-{r['otl']}"
+        lines.append(
+            f"  {name:<26} {record:<8} "
+            f"{r['win_pct']:.3f} {r['net_rating']:>+7.1f} "
+            f"{r['recent_form']:.2f}  {r['power_score']:.3f} "
+            f"{prob:.1%}"
+        )
+
+    if teams and len(teams) == 1:
+        team = teams[0]
+        if team in ratings:
+            prob = conf_probs[team] if conf_probs and team in conf_probs else ratings[team]["championship_prob"]
+            scope_label = f" {conference}" if conference else " championship"
+            lines.append(f"\nModel estimate for {team}: {prob:.1%} chance to win{scope_label}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# NBA Power Ratings — BallDontLie API (free)
 # ---------------------------------------------------------------------------
 
 def _fetch_nba_power_ratings() -> dict[str, dict] | None:
-    """Build NBA power ratings from current season standings and recent games.
-
-    Returns a dict of team_name -> {
-        wins, losses, win_pct, net_rating, recent_form, power_score, championship_prob
-    }
-    """
-    global _nba_ratings_cache
-    now = time.time()
-    if _nba_ratings_cache and (now - _nba_ratings_cache[0]) < NBA_RATINGS_TTL:
-        return _nba_ratings_cache[1]
+    cached = _get_cached_ratings("nba")
+    if cached:
+        return cached
 
     bdl_key = os.environ.get("BALLDONTLIE_API_KEY", "")
     headers = {"Authorization": bdl_key} if bdl_key else {}
 
-    # Fetch current season standings
-    try:
-        resp = httpx.get(
-            "https://api.balldontlie.io/v1/season_averages",
-            params={"season": 2025},
-            headers=headers,
-            timeout=15,
-        )
-    except Exception as e:
-        log.debug("BallDontLie season_averages failed: %s", e)
-
-    # Fetch recent games to compute team records and net ratings
     team_stats: dict[str, dict] = {}
     for page in range(1, 4):
         try:
@@ -467,10 +605,8 @@ def _fetch_nba_power_ratings() -> dict[str, dict] | None:
                 timeout=15,
             )
             if resp.status_code != 200:
-                log.debug("BallDontLie games page %d: status %d", page, resp.status_code)
                 break
-            data = resp.json()
-            games = data.get("data", [])
+            games = resp.json().get("data", [])
             if not games:
                 break
 
@@ -479,20 +615,15 @@ def _fetch_nba_power_ratings() -> dict[str, dict] | None:
                 away_name = game.get("visitor_team", {}).get("full_name", "")
                 home_score = game.get("home_team_score", 0)
                 away_score = game.get("visitor_team_score", 0)
-
                 if not home_score and not away_score:
                     continue
 
-                for name, pts_for, pts_against, is_home in [
-                    (home_name, home_score, away_score, True),
-                    (away_name, away_score, home_score, False),
+                for name, pts_for, pts_against in [
+                    (home_name, home_score, away_score),
+                    (away_name, away_score, home_score),
                 ]:
                     if name not in team_stats:
-                        team_stats[name] = {
-                            "wins": 0, "losses": 0,
-                            "pts_for": 0, "pts_against": 0,
-                            "games": 0, "recent_scores": [],
-                        }
+                        team_stats[name] = {"wins": 0, "losses": 0, "pts_for": 0, "pts_against": 0, "games": 0, "recent_scores": []}
                     ts = team_stats[name]
                     ts["games"] += 1
                     ts["pts_for"] += pts_for
@@ -502,120 +633,213 @@ def _fetch_nba_power_ratings() -> dict[str, dict] | None:
                     else:
                         ts["losses"] += 1
                     ts["recent_scores"].append(pts_for - pts_against)
-
         except Exception as e:
-            log.debug("BallDontLie games fetch error: %s", e)
+            log.debug("BallDontLie error: %s", e)
             break
 
     if not team_stats:
         return None
 
     ratings = {}
-    all_net = []
     for name, ts in team_stats.items():
         if ts["games"] == 0:
             continue
-        net_rating = (ts["pts_for"] - ts["pts_against"]) / ts["games"]
-        win_pct = ts["wins"] / ts["games"] if ts["games"] > 0 else 0.5
         recent = ts["recent_scores"][-10:]
-        recent_form = sum(1 for s in recent if s > 0) / len(recent) if recent else 0.5
-
         ratings[name] = {
             "wins": ts["wins"],
             "losses": ts["losses"],
-            "win_pct": win_pct,
-            "net_rating": net_rating,
-            "recent_form": recent_form,
+            "win_pct": ts["wins"] / ts["games"],
+            "net_rating": (ts["pts_for"] - ts["pts_against"]) / ts["games"],
+            "recent_form": sum(1 for s in recent if s > 0) / len(recent) if recent else 0.5,
             "games": ts["games"],
         }
-        all_net.append(net_rating)
 
-    if not ratings:
-        return None
-
-    # Compute power scores and championship probabilities
-    # Power score = weighted combo of win%, net rating (normalized), and recent form
-    min_net = min(all_net)
-    max_net = max(all_net)
-    net_range = max_net - min_net if max_net != min_net else 1.0
-
-    for name, r in ratings.items():
-        norm_net = (r["net_rating"] - min_net) / net_range
-        r["power_score"] = 0.4 * r["win_pct"] + 0.4 * norm_net + 0.2 * r["recent_form"]
-
-    # Convert power scores to championship probabilities via softmax
-    import math
-    TEMP = 8.0  # higher = more spread out, lower = winner-take-all
-    power_scores = {name: r["power_score"] for name, r in ratings.items()}
-    max_score = max(power_scores.values())
-    exp_scores = {name: math.exp(TEMP * (score - max_score)) for name, score in power_scores.items()}
-    total_exp = sum(exp_scores.values())
-
-    for name in ratings:
-        ratings[name]["championship_prob"] = exp_scores[name] / total_exp
-
-    _nba_ratings_cache = (now, ratings)
+    _compute_power_scores(ratings)
+    _save_ratings_cache("nba", ratings)
     return ratings
 
 
-def _format_nba_ratings(teams: list[str], question: str) -> str | None:
-    """Format NBA power ratings for specific teams or as a league overview."""
-    ratings = _fetch_nba_power_ratings()
+# ---------------------------------------------------------------------------
+# NHL Power Ratings — official NHL API (free, no key)
+# ---------------------------------------------------------------------------
+
+NHL_CONFERENCES = {
+    "Eastern": [],
+    "Western": [],
+}
+
+NHL_TEAM_NAME_MAP = {
+    "utah hockey club": "Utah Hockey Club",
+}
+
+
+def _fetch_nhl_power_ratings() -> dict[str, dict] | None:
+    cached = _get_cached_ratings("nhl")
+    if cached:
+        return cached
+
+    try:
+        client = httpx.Client(follow_redirects=True, timeout=15)
+        resp = client.get("https://api-web.nhle.com/v1/standings/now")
+        resp.raise_for_status()
+        standings = resp.json().get("standings", [])
+        client.close()
+    except Exception as e:
+        log.warning("NHL API error: %s", e)
+        return None
+
+    if not standings:
+        return None
+
+    NHL_CONFERENCES["Eastern"] = []
+    NHL_CONFERENCES["Western"] = []
+
+    ratings = {}
+    for team in standings:
+        full_name = team.get("teamName", {}).get("default", "")
+
+        wins = team.get("wins", 0)
+        losses = team.get("losses", 0)
+        otl = team.get("otLosses", 0)
+        gp = team.get("gamesPlayed", 0)
+        gf = team.get("goalFor", 0)
+        ga = team.get("goalAgainst", 0)
+        pts = team.get("points", 0)
+        streak = team.get("streakCode", "")
+        l10_wins = team.get("l10Wins", 0)
+        l10_losses = team.get("l10Losses", 0)
+        l10_otl = team.get("l10OtLosses", 0)
+        conf = team.get("conferenceName", "")
+
+        if conf in NHL_CONFERENCES:
+            NHL_CONFERENCES[conf].append(full_name)
+
+        if gp == 0:
+            continue
+
+        net_rating = (gf - ga) / gp
+        win_pct = (wins + 0.5 * otl) / gp  # OT losses are half-wins in NHL points
+        l10_total = l10_wins + l10_losses + l10_otl
+        recent_form = l10_wins / l10_total if l10_total > 0 else 0.5
+
+        ratings[full_name] = {
+            "wins": wins,
+            "losses": losses,
+            "otl": otl,
+            "win_pct": win_pct,
+            "net_rating": net_rating,
+            "recent_form": recent_form,
+            "games": gp,
+            "points": pts,
+        }
+
     if not ratings:
         return None
 
-    question_lower = question.lower()
-    is_conference = "east" in question_lower or "west" in question_lower
-    conference = "East" if "east" in question_lower else "West" if "west" in question_lower else None
+    _compute_power_scores(ratings)
+    _save_ratings_cache("nhl", ratings)
+    log.info("NHL power ratings: %d teams computed", len(ratings))
+    return ratings
 
-    if conference:
-        conf_teams = NBA_CONFERENCES.get(conference, [])
-        filtered = {k: v for k, v in ratings.items() if k in conf_teams}
-    elif teams:
-        filtered = {k: v for k, v in ratings.items() if k in teams}
-    else:
-        filtered = ratings
 
-    if not filtered:
+# ---------------------------------------------------------------------------
+# MLB Power Ratings — official MLB Stats API (free, no key)
+# ---------------------------------------------------------------------------
+
+MLB_LEAGUES = {
+    "American League": [],
+    "National League": [],
+}
+
+
+def _fetch_mlb_power_ratings() -> dict[str, dict] | None:
+    cached = _get_cached_ratings("mlb")
+    if cached:
+        return cached
+
+    try:
+        client = httpx.Client(follow_redirects=True, timeout=15)
+        resp = client.get("https://statsapi.mlb.com/api/v1/standings", params={
+            "leagueId": "103,104",
+            "season": 2026,
+            "standingsTypes": "regularSeason",
+            "hydrate": "team",
+        })
+        resp.raise_for_status()
+        data = resp.json()
+        client.close()
+    except Exception as e:
+        log.warning("MLB API error: %s", e)
         return None
 
-    sorted_teams = sorted(filtered.items(), key=lambda x: -x[1]["power_score"])
+    records = data.get("records", [])
+    if not records:
+        return None
 
-    scope = f" ({conference}ern Conference)" if conference else ""
-    lines = [f"NBA Power Ratings{scope} — from season game data:"]
-    lines.append(f"{'Team':<28} {'W-L':<8} {'Win%':<6} {'NetRtg':<8} {'Form':<6} {'Power':<6} {'Champ%':<7}")
+    # AL division IDs: 200 (West), 201 (East), 202 (Central)
+    # NL division IDs: 203 (West), 204 (East), 205 (Central)
+    AL_DIVISIONS = {200, 201, 202}
+    NL_DIVISIONS = {203, 204, 205}
 
-    # Recompute conference championship probs if needed
-    if conference:
-        import math
-        TEMP = 8.0
-        power_scores = {name: r["power_score"] for name, r in filtered.items()}
-        max_score = max(power_scores.values()) if power_scores else 0
-        exp_scores = {name: math.exp(TEMP * (score - max_score)) for name, score in power_scores.items()}
-        total_exp = sum(exp_scores.values()) if exp_scores else 1
-        conf_probs = {name: exp_scores[name] / total_exp for name in filtered}
-    else:
-        conf_probs = None
+    MLB_LEAGUES["American League"] = []
+    MLB_LEAGUES["National League"] = []
 
-    for name, r in sorted_teams[:15]:
-        prob = conf_probs[name] if conf_probs else r["championship_prob"]
-        lines.append(
-            f"  {name:<26} {r['wins']}-{r['losses']:<5} "
-            f"{r['win_pct']:.3f} {r['net_rating']:>+7.1f} "
-            f"{r['recent_form']:.2f}  {r['power_score']:.3f} "
-            f"{prob:.1%}"
-        )
+    ratings = {}
+    for division in records:
+        div_id = division.get("division", {}).get("id", 0)
+        for team_rec in division.get("teamRecords", []):
+            name = team_rec.get("team", {}).get("name", "")
+            wins = team_rec.get("wins", 0)
+            losses = team_rec.get("losses", 0)
+            gp = team_rec.get("gamesPlayed", 0)
+            rd = team_rec.get("runDifferential", 0)
+            rs = team_rec.get("runsScored", 0)
+            ra = team_rec.get("runsAllowed", 0)
 
-    if teams and len(teams) == 1:
-        team = teams[0]
-        if team in ratings:
-            r = ratings[team]
-            prob = conf_probs[team] if conf_probs and team in conf_probs else r["championship_prob"]
-            lines.append(f"\nModel estimate for {team}: {prob:.1%} chance to win" +
-                         (f" {conference}ern Conference" if conference else " championship"))
+            if div_id in AL_DIVISIONS:
+                MLB_LEAGUES["American League"].append(name)
+            elif div_id in NL_DIVISIONS:
+                MLB_LEAGUES["National League"].append(name)
 
-    return "\n".join(lines)
+            if gp == 0:
+                continue
 
+            net_rating = rd / gp
+            win_pct = wins / gp
+
+            # Pythagorean win expectation (Bill James formula) as a more stable estimate
+            if rs > 0 and ra > 0:
+                pyth_pct = rs ** 1.83 / (rs ** 1.83 + ra ** 1.83)
+            else:
+                pyth_pct = win_pct
+
+            # Recent form: blend actual win% with pythagorean (pythagorean is more predictive)
+            recent_form = pyth_pct
+
+            ratings[name] = {
+                "wins": wins,
+                "losses": losses,
+                "win_pct": win_pct,
+                "net_rating": net_rating,
+                "recent_form": recent_form,
+                "games": gp,
+                "runs_scored": rs,
+                "runs_allowed": ra,
+                "pyth_pct": pyth_pct,
+            }
+
+    if not ratings:
+        return None
+
+    _compute_power_scores(ratings)
+    _save_ratings_cache("mlb", ratings)
+    log.info("MLB power ratings: %d teams computed", len(ratings))
+    return ratings
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def is_sports_market(question: str) -> bool:
     """Check if a market question is sports-related."""
@@ -643,9 +867,22 @@ def fetch_sports_context(question: str) -> str | None:
         sections.append(f"\nBookmaker consensus odds:{odds_data}")
 
     if sport_key == "basketball_nba":
-        nba_ratings = _format_nba_ratings(teams, question)
-        if nba_ratings:
-            sections.append(f"\n{nba_ratings}")
+        ratings = _fetch_nba_power_ratings()
+        table = _format_ratings_table(ratings, teams, question, "NBA", NBA_CONFERENCES)
+        if table:
+            sections.append(f"\n{table}")
+
+    elif sport_key == "icehockey_nhl":
+        ratings = _fetch_nhl_power_ratings()
+        table = _format_ratings_table(ratings, teams, question, "NHL", NHL_CONFERENCES, diff_label="GD/GP")
+        if table:
+            sections.append(f"\n{table}")
+
+    elif sport_key == "baseball_mlb":
+        ratings = _fetch_mlb_power_ratings()
+        table = _format_ratings_table(ratings, teams, question, "MLB", MLB_LEAGUES, diff_label="RD/GP")
+        if table:
+            sections.append(f"\n{table}")
 
     if len(sections) == 1:
         return None
