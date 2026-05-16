@@ -15,7 +15,7 @@ load_dotenv(override=True)
 from ai_prophet_core import ServerAPIClient, TradeIntentRequest
 from ai_prophet_core.arena import BenchmarkSession
 
-from strategy import analyze_market
+from strategy import analyze_market, _classify_market
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ MAX_EXISTING_POSITION_PCT = 0.10
 STOP_LOSS_PCT = -0.30
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
-    "timestamp", "market_id", "action", "side", "shares",
+    "timestamp", "market_id", "market_type", "action", "side", "shares",
     "edge", "implied_prob", "estimated_prob",
     "status", "fill_price", "notional",
 ]
@@ -141,6 +141,7 @@ def run():
                             trade_records.append({
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                                 "market_id": market.market_id,
+                                "market_type": _classify_market(market),
                                 "action": "SELL",
                                 "side": existing_pos.side,
                                 "shares": sell_shares,
@@ -176,6 +177,7 @@ def run():
                         trade_records.append({
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                             "market_id": market.market_id,
+                            "market_type": _classify_market(market),
                             "action": "SELL",
                             "side": existing_pos.side,
                             "shares": sell_shares,
@@ -232,6 +234,7 @@ def run():
                 trade_records.append({
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "market_id": market.market_id,
+                    "market_type": _classify_market(market),
                     "action": action,
                     "side": side,
                     "shares": shares,
