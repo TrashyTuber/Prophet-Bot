@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 import requests
 from openai import OpenAI
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from tavily import TavilyClient
 from dotenv import load_dotenv
 
@@ -16,16 +18,23 @@ log = logging.getLogger(__name__)
 EDGE_THRESHOLD_DEFAULT = 0.10
 EDGE_THRESHOLD_WITH_DATA = 0.05
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
-MODEL = "anthropic/claude-sonnet-4"
+OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.environ.get("OPENROUTER_API_KEY"),
 )
 
+_http_session = requests.Session()
+_retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
+_http_session.mount("https://", HTTPAdapter(max_retries=_retry))
+
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 NEWS_DAYS_THRESHOLD = 3.0
+CACHE_PRICE_TOLERANCE = 0.02
+
+_estimate_cache = {}
 
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
@@ -108,7 +117,7 @@ def _fetch_fred_data(series_ids):
     lines = []
     for sid in series_ids[:3]:
         try:
-            resp = requests.get(
+            resp = _http_session.get(
                 "https://api.stlouisfed.org/fred/series/observations",
                 params={
                     "series_id": sid,
@@ -152,7 +161,7 @@ def _fetch_weather_data(question):
         return None
 
     try:
-        resp = requests.get(
+        resp = _http_session.get(
             OPEN_METEO_URL,
             params={
                 "latitude": lat,
@@ -207,13 +216,45 @@ CITY_COORDS = {
     "tokyo": (35.68, 139.69, "Tokyo"),
 }
 
+GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+_geocode_cache = {}
+
+
+def _geocode_from_question(question):
+    words = re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*", question)
+    for candidate in sorted(words, key=len, reverse=True):
+        candidate_lower = candidate.lower()
+        if candidate_lower in ("will", "the", "what", "how", "does", "may", "june",
+                               "july", "august", "january", "february", "march",
+                               "april", "september", "october", "november", "december"):
+            continue
+        if candidate_lower in _geocode_cache:
+            return _geocode_cache[candidate_lower]
+        try:
+            resp = _http_session.get(
+                GEOCODE_URL,
+                params={"name": candidate, "count": 1, "language": "en"},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            if results:
+                r = results[0]
+                val = (r["latitude"], r["longitude"], r["name"])
+                _geocode_cache[candidate_lower] = val
+                return val
+        except Exception:
+            log.debug("Geocode failed for %s", candidate)
+        _geocode_cache[candidate_lower] = (None, None, None)
+    return None, None, None
+
 
 def _extract_location(question):
     question_lower = question.lower()
     for city, (lat, lon, name) in CITY_COORDS.items():
         if city in question_lower:
             return lat, lon, name
-    return None, None, None
+    return _geocode_from_question(question)
 
 
 SYSTEM_PROMPT = """\
@@ -344,36 +385,49 @@ def analyze_market(market):
     if news:
         external_data = f"{external_data}\n\n{news}" if external_data else news
 
-    log.info("[STRATEGY] %s type=%s data=%s news=%s", market.market_id, market_type,
-             "yes" if external_data else "no", "yes" if news else "no")
+    cached = _estimate_cache.get(market.market_id)
+    if cached and abs(cached["implied_prob"] - implied_prob) < CACHE_PRICE_TOLERANCE:
+        estimated_prob = cached["estimated_prob"]
+        reasoning = cached["reasoning"]
+        log.info("[STRATEGY] CACHE HIT %s | implied=%.2f estimated=%.2f",
+                 market.market_id, implied_prob, estimated_prob)
+    else:
+        log.info("[STRATEGY] %s type=%s data=%s news=%s", market.market_id, market_type,
+                 "yes" if external_data else "no", "yes" if news else "no")
 
-    user_msg = _build_user_message(market, implied_prob, external_data)
+        user_msg = _build_user_message(market, implied_prob, external_data)
 
-    cached_examples = list(FEW_SHOT_EXAMPLES)
-    cached_examples[-1] = {
-        "role": cached_examples[-1]["role"],
-        "content": [{"type": "text", "text": cached_examples[-1]["content"], "cache_control": {"type": "ephemeral"}}],
-    }
+        cached_examples = list(FEW_SHOT_EXAMPLES)
+        cached_examples[-1] = {
+            "role": cached_examples[-1]["role"],
+            "content": [{"type": "text", "text": cached_examples[-1]["content"], "cache_control": {"type": "ephemeral"}}],
+        }
 
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
-    ] + cached_examples + [{"role": "user", "content": user_msg}]
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
+        ] + cached_examples + [{"role": "user", "content": user_msg}]
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        max_tokens=256,
-        messages=messages,
-    )
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            max_tokens=256,
+            messages=messages,
+        )
 
-    text = response.choices[0].message.content.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    match = re.search(r'\{[^}]+\}', text)
-    if match:
-        text = match.group(0)
-    result = json.loads(text)
-    estimated_prob = float(result["probability"])
-    reasoning = result.get("reasoning", "")
+        text = response.choices[0].message.content.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        match = re.search(r'\{[^}]+\}', text)
+        if match:
+            text = match.group(0)
+        result = json.loads(text)
+        estimated_prob = float(result["probability"])
+        reasoning = result.get("reasoning", "")
+
+        _estimate_cache[market.market_id] = {
+            "implied_prob": implied_prob,
+            "estimated_prob": estimated_prob,
+            "reasoning": reasoning,
+        }
 
     log.info(
         "[STRATEGY] %s | implied=%.2f estimated=%.2f | %s",
