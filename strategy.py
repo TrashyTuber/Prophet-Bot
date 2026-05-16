@@ -90,7 +90,7 @@ SPORTS_KEYWORDS = [
     "basketball", "football", "baseball", "hockey", "soccer", "tennis",
     "premier league", "epl", "champions league", "la liga", "serie a",
     "bundesliga", "playoff", "finals", "championship",
-    "super bowl", "world series", "stanley cup", "world cup",
+    "super bowl", "world series", "stanley cup", "world cup", "fifa",
     "touchdown", "home run", "three-pointer", "field goal",
     "quarterback", "pitcher", "goalkeeper", "striker",
     "halftime", "inning", "overtime", "penalty kick",

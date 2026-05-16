@@ -300,7 +300,136 @@ NHL_TEAMS = {
     "caps": "Washington Capitals",
 }
 
-ALL_TEAMS = {**NBA_TEAMS, **MLB_TEAMS, **NFL_TEAMS, **NHL_TEAMS}
+WORLD_CUP_TEAMS = {
+    "argentina": "Argentina",
+    "brazil": "Brazil",
+    "france": "France",
+    "england": "England",
+    "spain": "Spain",
+    "germany": "Germany",
+    "portugal": "Portugal",
+    "netherlands": "Netherlands",
+    "belgium": "Belgium",
+    "italy": "Italy",
+    "croatia": "Croatia",
+    "uruguay": "Uruguay",
+    "colombia": "Colombia",
+    "mexico": "Mexico",
+    "usa": "United States",
+    "united states": "United States",
+    "japan": "Japan",
+    "south korea": "South Korea",
+    "korea": "South Korea",
+    "australia": "Australia",
+    "senegal": "Senegal",
+    "morocco": "Morocco",
+    "nigeria": "Nigeria",
+    "cameroon": "Cameroon",
+    "ghana": "Ghana",
+    "ecuador": "Ecuador",
+    "saudi arabia": "Saudi Arabia",
+    "iran": "Iran",
+    "canada": "Canada",
+    "poland": "Poland",
+    "denmark": "Denmark",
+    "switzerland": "Switzerland",
+    "serbia": "Serbia",
+}
+
+# FIFA ranking points (approximate as of early 2026) — higher = better
+FIFA_RANKINGS = {
+    "Argentina": 1, "France": 2, "Brazil": 3, "England": 4, "Belgium": 5,
+    "Spain": 6, "Netherlands": 7, "Portugal": 8, "Italy": 9, "Germany": 10,
+    "Croatia": 11, "Uruguay": 12, "Colombia": 13, "Mexico": 14, "United States": 15,
+    "Morocco": 16, "Switzerland": 17, "Japan": 18, "Denmark": 19, "Senegal": 20,
+    "Poland": 21, "South Korea": 22, "Australia": 23, "Nigeria": 24, "Ecuador": 25,
+    "Serbia": 26, "Iran": 27, "Ghana": 28, "Cameroon": 29, "Canada": 30,
+    "Saudi Arabia": 31,
+}
+
+# Historical World Cup performance — weighted recent tournaments more heavily
+# Format: {"titles": int, "finals": int, "semis": int, "quarters": int, "appearances": int}
+WORLD_CUP_HISTORY = {
+    "Argentina": {"titles": 3, "finals": 6, "semis": 7, "quarters": 11, "appearances": 18},
+    "Brazil": {"titles": 5, "finals": 7, "semis": 12, "quarters": 15, "appearances": 22},
+    "France": {"titles": 2, "finals": 3, "semis": 5, "quarters": 8, "appearances": 16},
+    "Germany": {"titles": 4, "finals": 8, "semis": 13, "quarters": 16, "appearances": 20},
+    "Italy": {"titles": 4, "finals": 6, "semis": 8, "quarters": 10, "appearances": 18},
+    "England": {"titles": 1, "finals": 1, "semis": 3, "quarters": 8, "appearances": 16},
+    "Spain": {"titles": 1, "finals": 1, "semis": 2, "quarters": 5, "appearances": 16},
+    "Netherlands": {"titles": 0, "finals": 3, "semis": 5, "quarters": 7, "appearances": 11},
+    "Uruguay": {"titles": 2, "finals": 2, "semis": 5, "quarters": 7, "appearances": 14},
+    "Croatia": {"titles": 0, "finals": 2, "semis": 3, "quarters": 3, "appearances": 6},
+    "Portugal": {"titles": 0, "finals": 0, "semis": 2, "quarters": 4, "appearances": 8},
+    "Belgium": {"titles": 0, "finals": 0, "semis": 2, "quarters": 3, "appearances": 14},
+    "Morocco": {"titles": 0, "finals": 0, "semis": 1, "quarters": 1, "appearances": 6},
+    "Colombia": {"titles": 0, "finals": 0, "semis": 0, "quarters": 2, "appearances": 6},
+    "Mexico": {"titles": 0, "finals": 0, "semis": 0, "quarters": 2, "appearances": 17},
+    "South Korea": {"titles": 0, "finals": 0, "semis": 1, "quarters": 1, "appearances": 11},
+    "Japan": {"titles": 0, "finals": 0, "semis": 0, "quarters": 1, "appearances": 7},
+    "United States": {"titles": 0, "finals": 0, "semis": 1, "quarters": 1, "appearances": 11},
+    "Senegal": {"titles": 0, "finals": 0, "semis": 0, "quarters": 1, "appearances": 3},
+    "Switzerland": {"titles": 0, "finals": 0, "semis": 0, "quarters": 2, "appearances": 12},
+    "Denmark": {"titles": 0, "finals": 0, "semis": 0, "quarters": 1, "appearances": 6},
+    "Poland": {"titles": 0, "finals": 0, "semis": 2, "quarters": 2, "appearances": 9},
+    "Ecuador": {"titles": 0, "finals": 0, "semis": 0, "quarters": 0, "appearances": 4},
+    "Serbia": {"titles": 0, "finals": 0, "semis": 0, "quarters": 1, "appearances": 3},
+    "Australia": {"titles": 0, "finals": 0, "semis": 0, "quarters": 0, "appearances": 6},
+    "Nigeria": {"titles": 0, "finals": 0, "semis": 0, "quarters": 1, "appearances": 7},
+    "Ghana": {"titles": 0, "finals": 0, "semis": 0, "quarters": 1, "appearances": 4},
+    "Cameroon": {"titles": 0, "finals": 0, "semis": 0, "quarters": 1, "appearances": 8},
+    "Iran": {"titles": 0, "finals": 0, "semis": 0, "quarters": 0, "appearances": 6},
+    "Canada": {"titles": 0, "finals": 0, "semis": 0, "quarters": 0, "appearances": 2},
+    "Saudi Arabia": {"titles": 0, "finals": 0, "semis": 0, "quarters": 0, "appearances": 7},
+}
+
+# Squad quality: average club strength based on league placement of key players' clubs
+# Scale 0-1: 1.0 = squad full of Champions League winners, 0.0 = all from lower leagues
+# Based on 2025-26 squad projections and current club form
+SQUAD_QUALITY = {
+    "Argentina": 0.88,  # Messi retired but strong spine at top clubs (PL, La Liga, Serie A)
+    "Brazil": 0.90,     # Deep talent pool across Europe's top leagues
+    "France": 0.93,     # Mbappé, depth across PL/La Liga/Ligue 1 elite
+    "England": 0.91,    # Mostly Premier League starters at top-6 clubs
+    "Spain": 0.87,      # La Liga core + PL contingent (Rodri, etc.)
+    "Germany": 0.84,    # Bundesliga + PL representation
+    "Portugal": 0.85,   # Strong PL/La Liga presence
+    "Netherlands": 0.82, # Spread across PL, Bundesliga, Serie A
+    "Belgium": 0.78,    # Aging golden generation, fewer top-club starters
+    "Italy": 0.80,      # Serie A dominated, fewer abroad at elite level
+    "Croatia": 0.79,    # Key players at Real Madrid, PL clubs
+    "Uruguay": 0.76,    # Valverde, Núñez + Liga depth
+    "Colombia": 0.73,   # Rising talent in PL and Serie A
+    "Morocco": 0.72,    # PSG, PL, La Liga contingent post-2022 breakout
+    "Mexico": 0.58,     # Mostly Liga MX, few in Europe
+    "United States": 0.68, # Growing PL/Bundesliga contingent (Pulisic, McKennie, etc.)
+    "Japan": 0.70,      # Strong Bundesliga/PL presence
+    "South Korea": 0.63, # Son + smaller European contingent
+    "Senegal": 0.71,    # PL, Ligue 1 representation
+    "Denmark": 0.72,    # PL presence (Højlund, Eriksen, etc.)
+    "Switzerland": 0.68, # Bundesliga/Serie A representation
+    "Poland": 0.65,     # Lewandowski still anchors, but aging squad
+    "Nigeria": 0.66,    # PL and Serie A scattered
+    "Ecuador": 0.60,    # Growing European presence
+    "Serbia": 0.67,     # PL and Serie A players
+    "Australia": 0.55,  # Mostly domestic + lower European leagues
+    "Ghana": 0.58,      # PL fringe + Bundesliga
+    "Cameroon": 0.57,   # Ligue 1 + PL fringe
+    "Iran": 0.45,       # Mostly domestic league
+    "Canada": 0.62,     # MLS + growing European contingent (David, Davies)
+    "Saudi Arabia": 0.42, # Mostly Saudi Pro League
+}
+
+WORLD_CUP_CONFEDERATIONS = {
+    "UEFA": ["France", "England", "Spain", "Germany", "Portugal", "Netherlands",
+             "Belgium", "Italy", "Croatia", "Denmark", "Switzerland", "Serbia", "Poland"],
+    "CONMEBOL": ["Argentina", "Brazil", "Uruguay", "Colombia", "Ecuador"],
+    "CONCACAF": ["Mexico", "United States", "Canada"],
+    "AFC": ["Japan", "South Korea", "Australia", "Iran", "Saudi Arabia"],
+    "CAF": ["Morocco", "Senegal", "Nigeria", "Cameroon", "Ghana"],
+}
+
+ALL_TEAMS = {**NBA_TEAMS, **MLB_TEAMS, **NFL_TEAMS, **NHL_TEAMS, **WORLD_CUP_TEAMS}
 
 
 def _detect_sport(question: str) -> dict | None:
@@ -318,6 +447,8 @@ def _detect_sport(question: str) -> dict | None:
                 return SPORT_KEYWORDS["nfl"]
             if team in NHL_TEAMS:
                 return SPORT_KEYWORDS["nhl"]
+            if team in WORLD_CUP_TEAMS:
+                return SPORT_KEYWORDS["world cup"]
     return None
 
 
@@ -1024,6 +1155,59 @@ def _fetch_mlb_power_ratings() -> dict[str, dict] | None:
 
 
 # ---------------------------------------------------------------------------
+# World Cup Power Ratings — hardcoded from FIFA rankings, history, squad quality
+# ---------------------------------------------------------------------------
+
+def _fetch_world_cup_power_ratings() -> dict[str, dict] | None:
+    cached = _get_cached_ratings("world_cup")
+    if cached:
+        return cached
+
+    total_teams = len(FIFA_RANKINGS)
+    ratings = {}
+
+    for country, rank in FIFA_RANKINGS.items():
+        history = WORLD_CUP_HISTORY.get(country, {})
+        squad = SQUAD_QUALITY.get(country, 0.5)
+
+        # Normalize FIFA ranking to 0-1 (rank 1 = 1.0, rank 31 = 0.0)
+        rank_score = 1.0 - (rank - 1) / (total_teams - 1)
+
+        # Historical performance score
+        titles = history.get("titles", 0)
+        finals = history.get("finals", 0)
+        semis = history.get("semis", 0)
+        quarters = history.get("quarters", 0)
+        appearances = history.get("appearances", 0)
+        # Weighted: titles matter most, then depth of runs
+        history_raw = titles * 5.0 + finals * 2.0 + semis * 1.0 + quarters * 0.5
+        # Normalize — Brazil has max history_raw = 5*5 + 7*2 + 12*1 + 15*0.5 = 58.5
+        history_score = min(history_raw / 40.0, 1.0)
+
+        # Composite: 30% FIFA rank, 25% history, 45% squad quality (current form)
+        win_pct = 0.30 * rank_score + 0.25 * history_score + 0.45 * squad
+        net_rating = (rank_score - 0.5) * 10.0  # synthetic scale for display
+        recent_form = squad  # squad quality is our best proxy for current form
+
+        ratings[country] = {
+            "wins": titles,
+            "losses": appearances - titles,
+            "win_pct": win_pct,
+            "net_rating": net_rating,
+            "recent_form": recent_form,
+            "games": appearances,
+            "fifa_rank": rank,
+            "squad_quality": squad,
+            "history_score": history_score,
+        }
+
+    _compute_power_scores(ratings)
+    _save_ratings_cache("world_cup", ratings)
+    log.info("World Cup power ratings: %d teams computed", len(ratings))
+    return ratings
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1075,6 +1259,12 @@ def fetch_sports_context(question: str) -> str | None:
     elif sport_key == "baseball_mlb":
         ratings = _fetch_mlb_power_ratings()
         table = _format_ratings_table(ratings, teams, question, "MLB", MLB_LEAGUES, diff_label="RD/GP")
+        if table:
+            sections.append(f"\n{table}")
+
+    elif sport_key == "soccer_fifa_world_cup":
+        ratings = _fetch_world_cup_power_ratings()
+        table = _format_ratings_table(ratings, teams, question, "World Cup", WORLD_CUP_CONFEDERATIONS)
         if table:
             sections.append(f"\n{table}")
 
