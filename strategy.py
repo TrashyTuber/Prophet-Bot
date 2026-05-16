@@ -26,6 +26,9 @@ client = openai.OpenAI(
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 NEWS_DAYS_THRESHOLD = 3.0
+CACHE_PRICE_TOLERANCE = 0.02
+
+_estimate_cache = {}
 
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
@@ -344,36 +347,49 @@ def analyze_market(market):
     if news:
         external_data = f"{external_data}\n\n{news}" if external_data else news
 
-    log.info("[STRATEGY] %s type=%s data=%s news=%s", market.market_id, market_type,
-             "yes" if external_data else "no", "yes" if news else "no")
+    cached = _estimate_cache.get(market.market_id)
+    if cached and abs(cached["implied_prob"] - implied_prob) < CACHE_PRICE_TOLERANCE:
+        estimated_prob = cached["estimated_prob"]
+        reasoning = cached["reasoning"]
+        log.info("[STRATEGY] CACHE HIT %s | implied=%.2f estimated=%.2f",
+                 market.market_id, implied_prob, estimated_prob)
+    else:
+        log.info("[STRATEGY] %s type=%s data=%s news=%s", market.market_id, market_type,
+                 "yes" if external_data else "no", "yes" if news else "no")
 
-    user_msg = _build_user_message(market, implied_prob, external_data)
+        user_msg = _build_user_message(market, implied_prob, external_data)
 
-    cached_examples = list(FEW_SHOT_EXAMPLES)
-    cached_examples[-1] = {
-        "role": cached_examples[-1]["role"],
-        "content": [{"type": "text", "text": cached_examples[-1]["content"], "cache_control": {"type": "ephemeral"}}],
-    }
+        cached_examples = list(FEW_SHOT_EXAMPLES)
+        cached_examples[-1] = {
+            "role": cached_examples[-1]["role"],
+            "content": [{"type": "text", "text": cached_examples[-1]["content"], "cache_control": {"type": "ephemeral"}}],
+        }
 
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
-    ] + cached_examples + [{"role": "user", "content": user_msg}]
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
+        ] + cached_examples + [{"role": "user", "content": user_msg}]
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        max_tokens=256,
-        messages=messages,
-    )
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            max_tokens=256,
+            messages=messages,
+        )
 
-    text = response.choices[0].message.content.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    match = re.search(r'\{[^}]+\}', text)
-    if match:
-        text = match.group(0)
-    result = json.loads(text)
-    estimated_prob = float(result["probability"])
-    reasoning = result.get("reasoning", "")
+        text = response.choices[0].message.content.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        match = re.search(r'\{[^}]+\}', text)
+        if match:
+            text = match.group(0)
+        result = json.loads(text)
+        estimated_prob = float(result["probability"])
+        reasoning = result.get("reasoning", "")
+
+        _estimate_cache[market.market_id] = {
+            "implied_prob": implied_prob,
+            "estimated_prob": estimated_prob,
+            "reasoning": reasoning,
+        }
 
     log.info(
         "[STRATEGY] %s | implied=%.2f estimated=%.2f | %s",
