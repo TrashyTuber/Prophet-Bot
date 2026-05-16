@@ -4,21 +4,24 @@ import os
 import re
 from datetime import datetime, timezone
 
-import anthropic
 import requests
+from openai import OpenAI
 from tavily import TavilyClient
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 
 EDGE_THRESHOLD_DEFAULT = 0.10
 EDGE_THRESHOLD_WITH_DATA = 0.05
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+MODEL = "anthropic/claude-sonnet-4.6"
 
-client = anthropic.Anthropic()
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY"),
+)
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
@@ -321,6 +324,11 @@ def analyze_market(market):
     implied_prob = yes_ask
 
     market_type = _classify_market(market)
+
+    if market_type == "general":
+        log.info("[STRATEGY] %s type=general — skipping (no data advantage)", market.market_id)
+        return None
+
     external_data = None
 
     if market_type == "economics":
@@ -341,18 +349,28 @@ def analyze_market(market):
 
     user_msg = _build_user_message(market, implied_prob, external_data)
 
-    messages = list(FEW_SHOT_EXAMPLES) + [{"role": "user", "content": user_msg}]
+    cached_examples = list(FEW_SHOT_EXAMPLES)
+    cached_examples[-1] = {
+        "role": cached_examples[-1]["role"],
+        "content": [{"type": "text", "text": cached_examples[-1]["content"], "cache_control": {"type": "ephemeral"}}],
+    }
 
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
+    ] + cached_examples + [{"role": "user", "content": user_msg}]
+
+    response = client.chat.completions.create(
+        model=MODEL,
         max_tokens=256,
-        system=SYSTEM_PROMPT,
         messages=messages,
     )
 
-    text = response.content[0].text.strip()
+    text = response.choices[0].message.content.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    match = re.search(r'\{[^}]+\}', text)
+    if match:
+        text = match.group(0)
     result = json.loads(text)
     estimated_prob = float(result["probability"])
     reasoning = result.get("reasoning", "")

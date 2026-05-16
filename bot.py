@@ -10,12 +10,12 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
+load_dotenv(override=True)
+
 from ai_prophet_core import ServerAPIClient, TradeIntentRequest
 from ai_prophet_core.arena import BenchmarkSession
 
 from strategy import analyze_market
-
-load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="claude-bot-v1",
+            slug="claude-bot-v2",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
             n_ticks=96,
