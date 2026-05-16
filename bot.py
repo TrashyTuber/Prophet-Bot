@@ -16,6 +16,7 @@ from ai_prophet_core import ServerAPIClient, TradeIntentRequest
 from ai_prophet_core.arena import BenchmarkSession
 
 from strategy import analyze_market, _classify_market
+from data.sports import _extract_teams, _detect_sport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -32,6 +33,9 @@ MAX_NOTIONAL_PER_MARKET = 1_000
 MAX_TOTAL_DEPLOYED_PCT = 0.70
 MAX_EXISTING_POSITION_PCT = 0.10
 MAX_INTENTS_PER_TICK = 10
+MAX_TEAM_EXPOSURE_PCT = 0.10
+MAX_GAME_EXPOSURE_PCT = 0.08
+MAX_LEAGUE_EXPOSURE_PCT = 0.30
 STOP_LOSS_PCT = -0.30
 TAKE_PROFIT_PCT = 0.20
 TRADES_CSV = "trades.csv"
@@ -65,6 +69,82 @@ def _log_trades(records):
         if write_header:
             writer.writeheader()
         writer.writerows(records)
+
+
+def _get_correlation_groups(market):
+    """Extract correlation groups for a sports market: teams, game key, league."""
+    question = market.question
+    teams = _extract_teams(question)
+    sport_info = _detect_sport(question)
+    league = sport_info["label"] if sport_info else None
+
+    if len(teams) >= 2:
+        game_key = "-vs-".join(sorted(teams[:2]))
+    elif teams:
+        game_key = teams[0]
+    else:
+        game_key = None
+
+    return {"teams": teams, "game": game_key, "league": league}
+
+
+class CorrelationTracker:
+    """Tracks cumulative exposure by team, game, and league within a tick."""
+
+    def __init__(self, equity, existing_positions, markets_by_id):
+        self.equity = equity
+        self.team_exposure = {}
+        self.game_exposure = {}
+        self.league_exposure = {}
+
+        for market_id, pos in existing_positions.items():
+            market = markets_by_id.get(market_id)
+            if not market or _classify_market(market) != "sports":
+                continue
+            mv = float(pos.shares) * float(pos.current_price)
+            groups = _get_correlation_groups(market)
+            for team in groups["teams"]:
+                self.team_exposure[team] = self.team_exposure.get(team, 0.0) + mv
+            if groups["game"]:
+                self.game_exposure[groups["game"]] = self.game_exposure.get(groups["game"], 0.0) + mv
+            if groups["league"]:
+                self.league_exposure[groups["league"]] = self.league_exposure.get(groups["league"], 0.0) + mv
+
+    def check(self, market, proposed_notional):
+        """Return (allowed, reason) for a proposed sports trade."""
+        if _classify_market(market) != "sports":
+            return True, ""
+
+        groups = _get_correlation_groups(market)
+
+        for team in groups["teams"]:
+            current = self.team_exposure.get(team, 0.0)
+            if (current + proposed_notional) / self.equity > MAX_TEAM_EXPOSURE_PCT:
+                return False, f"team '{team}' exposure would exceed {MAX_TEAM_EXPOSURE_PCT*100:.0f}%"
+
+        if groups["game"]:
+            current = self.game_exposure.get(groups["game"], 0.0)
+            if (current + proposed_notional) / self.equity > MAX_GAME_EXPOSURE_PCT:
+                return False, f"game '{groups['game']}' exposure would exceed {MAX_GAME_EXPOSURE_PCT*100:.0f}%"
+
+        if groups["league"]:
+            current = self.league_exposure.get(groups["league"], 0.0)
+            if (current + proposed_notional) / self.equity > MAX_LEAGUE_EXPOSURE_PCT:
+                return False, f"league '{groups['league']}' exposure would exceed {MAX_LEAGUE_EXPOSURE_PCT*100:.0f}%"
+
+        return True, ""
+
+    def record(self, market, notional):
+        """Record a trade that passed checks."""
+        if _classify_market(market) != "sports":
+            return
+        groups = _get_correlation_groups(market)
+        for team in groups["teams"]:
+            self.team_exposure[team] = self.team_exposure.get(team, 0.0) + notional
+        if groups["game"]:
+            self.game_exposure[groups["game"]] = self.game_exposure.get(groups["game"], 0.0) + notional
+        if groups["league"]:
+            self.league_exposure[groups["league"]] = self.league_exposure.get(groups["league"], 0.0) + notional
 
 
 def run():
@@ -116,6 +196,9 @@ def run():
                     position_value[pos.market_id] = mv
                     positions_by_market[pos.market_id] = pos
                     total_deployed += mv
+
+            markets_by_id = {m.market_id: m for m in markets}
+            corr_tracker = CorrelationTracker(equity, positions_by_market, markets_by_id)
 
             log.info("Tick claimed — %d markets, cash=%.2f, equity=%.2f, deployed=%.0f%%",
                      len(markets), available_cash, equity, total_deployed / equity * 100)
@@ -238,11 +321,17 @@ def run():
                     log.info("  RISK SKIP %s — existing position already %.0f%% of equity", market.market_id, existing_mv / equity * 100)
                     continue
 
+                corr_ok, corr_reason = corr_tracker.check(market, proposed_notional)
+                if not corr_ok:
+                    log.info("  CORR SKIP %s — %s", market.market_id, corr_reason)
+                    continue
+
                 if len(intents) >= MAX_INTENTS_PER_TICK:
                     log.info("  RISK SKIP %s — already at %d intents (max per tick)", market.market_id, MAX_INTENTS_PER_TICK)
                     break
 
                 total_deployed += proposed_notional
+                corr_tracker.record(market, proposed_notional)
 
                 implied_prob = float(market.quote.best_ask)
                 if side == "YES":
