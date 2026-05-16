@@ -156,7 +156,7 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="claude-bot-v10",
+            slug="claude-bot-v11",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
             n_ticks=96,
