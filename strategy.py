@@ -4,12 +4,12 @@ import os
 import re
 from datetime import datetime, timezone
 
-import openai
 import requests
+from openai import OpenAI
 from tavily import TavilyClient
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 
@@ -324,6 +324,11 @@ def analyze_market(market):
     implied_prob = yes_ask
 
     market_type = _classify_market(market)
+
+    if market_type == "general":
+        log.info("[STRATEGY] %s type=general — skipping (no data advantage)", market.market_id)
+        return None
+
     external_data = None
 
     if market_type == "economics":
@@ -344,10 +349,18 @@ def analyze_market(market):
 
     user_msg = _build_user_message(market, implied_prob, external_data)
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(FEW_SHOT_EXAMPLES) + [{"role": "user", "content": user_msg}]
+    cached_examples = list(FEW_SHOT_EXAMPLES)
+    cached_examples[-1] = {
+        "role": cached_examples[-1]["role"],
+        "content": [{"type": "text", "text": cached_examples[-1]["content"], "cache_control": {"type": "ephemeral"}}],
+    }
+
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]},
+    ] + cached_examples + [{"role": "user", "content": user_msg}]
 
     response = client.chat.completions.create(
-        model=OPENROUTER_MODEL,
+        model=MODEL,
         max_tokens=256,
         messages=messages,
     )
@@ -355,6 +368,9 @@ def analyze_market(market):
     text = response.choices[0].message.content.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    match = re.search(r'\{[^}]+\}', text)
+    if match:
+        text = match.group(0)
     result = json.loads(text)
     estimated_prob = float(result["probability"])
     reasoning = result.get("reasoning", "")
