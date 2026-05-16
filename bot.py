@@ -32,6 +32,7 @@ MAX_SINGLE_MARKET_PCT = 0.15
 MAX_TOTAL_DEPLOYED_PCT = 0.70
 MAX_EXISTING_POSITION_PCT = 0.10
 STOP_LOSS_PCT = -0.30
+TAKE_PROFIT_PCT = 0.20
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
     "timestamp", "market_id", "action", "side", "shares",
@@ -127,10 +128,11 @@ def run():
                     entry_cost = float(existing_pos.shares) * float(existing_pos.avg_entry_price)
                     if entry_cost > 0:
                         pnl_pct = float(existing_pos.unrealized_pnl) / entry_cost
-                        if pnl_pct <= STOP_LOSS_PCT:
+                        if pnl_pct <= STOP_LOSS_PCT or pnl_pct >= TAKE_PROFIT_PCT:
                             sell_shares = int(float(existing_pos.shares))
-                            log.info("  STOP-LOSS SELL %s %d shares on %s (pnl=%.0f%%)",
-                                     existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
+                            reason = "STOP-LOSS" if pnl_pct < 0 else "TAKE-PROFIT"
+                            log.info("  %s SELL %s %d shares on %s (pnl=%.0f%%)",
+                                     reason, existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
                             intents.append(TradeIntentRequest(
                                 market_id=market.market_id,
                                 action="SELL",
@@ -152,6 +154,9 @@ def run():
                                 "notional": "",
                             })
                             continue
+
+                if total_deployed / equity >= MAX_TOTAL_DEPLOYED_PCT:
+                    continue
 
                 try:
                     decision = analyze_market(market)
