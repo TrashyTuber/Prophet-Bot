@@ -74,8 +74,8 @@ def run():
                 if decision is None:
                     continue
 
-                action, side = decision
-                log.info("  TRADE %s %s %s shares on %s", action, side, SHARES_PER_TRADE, market.market_id)
+                action, side, edge = decision
+                log.info("  TRADE %s %s %s shares on %s (edge=%.2f)", action, side, SHARES_PER_TRADE, market.market_id, edge)
                 intents.append(TradeIntentRequest(
                     market_id=market.market_id,
                     action=action,
