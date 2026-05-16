@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-import anthropic
+import openai
 import requests
 from tavily import TavilyClient
 from dotenv import load_dotenv
@@ -16,9 +16,12 @@ log = logging.getLogger(__name__)
 EDGE_THRESHOLD_DEFAULT = 0.10
 EDGE_THRESHOLD_WITH_DATA = 0.05
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
-client = anthropic.Anthropic()
+client = openai.OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY"),
+)
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
@@ -341,16 +344,15 @@ def analyze_market(market):
 
     user_msg = _build_user_message(market, implied_prob, external_data)
 
-    messages = list(FEW_SHOT_EXAMPLES) + [{"role": "user", "content": user_msg}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(FEW_SHOT_EXAMPLES) + [{"role": "user", "content": user_msg}]
 
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
+    response = client.chat.completions.create(
+        model=OPENROUTER_MODEL,
         max_tokens=256,
-        system=SYSTEM_PROMPT,
         messages=messages,
     )
 
-    text = response.content[0].text.strip()
+    text = response.choices[0].message.content.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     result = json.loads(text)
