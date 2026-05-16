@@ -13,10 +13,14 @@ import time
 from datetime import datetime, timezone
 
 import httpx
+from tavily import TavilyClient
 
 log = logging.getLogger(__name__)
 
 ODDS_API_KEY = os.environ.get("THE_ODDS_API_KEY")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+_tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
+
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
 ODDS_CACHE_TTL = 4 * 3600  # 4 hours — championship odds barely move
 
@@ -580,16 +584,15 @@ def _format_ratings_table(
 
 # ---------------------------------------------------------------------------
 # NBA Power Ratings — BallDontLie API (free)
+# Blends playoff data (80%) with regular season (20%) as a baseline.
 # ---------------------------------------------------------------------------
 
-def _fetch_nba_power_ratings() -> dict[str, dict] | None:
-    cached = _get_cached_ratings("nba")
-    if cached:
-        return cached
+PLAYOFF_WEIGHT = 0.80
+REGULAR_SEASON_WEIGHT = 0.20
 
-    bdl_key = os.environ.get("BALLDONTLIE_API_KEY", "")
-    headers = {"Authorization": bdl_key} if bdl_key else {}
 
+def _fetch_nba_games(postseason: bool, headers: dict) -> dict[str, dict]:
+    """Fetch NBA game data for a season type. Returns team stats dict."""
     team_stats: dict[str, dict] = {}
     for page in range(1, 4):
         try:
@@ -599,7 +602,7 @@ def _fetch_nba_power_ratings() -> dict[str, dict] | None:
                     "seasons[]": 2025,
                     "per_page": 100,
                     "cursor": (page - 1) * 100 if page > 1 else 0,
-                    "postseason": "true",
+                    "postseason": "true" if postseason else "false",
                 },
                 headers=headers,
                 timeout=15,
@@ -636,27 +639,210 @@ def _fetch_nba_power_ratings() -> dict[str, dict] | None:
         except Exception as e:
             log.debug("BallDontLie error: %s", e)
             break
+    return team_stats
 
-    if not team_stats:
+
+def _fetch_nba_power_ratings() -> dict[str, dict] | None:
+    cached = _get_cached_ratings("nba")
+    if cached:
+        return cached
+
+    bdl_key = os.environ.get("BALLDONTLIE_API_KEY", "")
+    headers = {"Authorization": bdl_key} if bdl_key else {}
+
+    playoff_stats = _fetch_nba_games(postseason=True, headers=headers)
+    regular_stats = _fetch_nba_games(postseason=False, headers=headers)
+
+    all_teams = set(playoff_stats.keys()) | set(regular_stats.keys())
+    if not all_teams:
         return None
 
     ratings = {}
-    for name, ts in team_stats.items():
-        if ts["games"] == 0:
+    for name in all_teams:
+        ps = playoff_stats.get(name)
+        rs = regular_stats.get(name)
+
+        if ps and ps["games"] > 0:
+            p_win_pct = ps["wins"] / ps["games"]
+            p_net = (ps["pts_for"] - ps["pts_against"]) / ps["games"]
+            p_recent = ps["recent_scores"][-10:]
+            p_form = sum(1 for s in p_recent if s > 0) / len(p_recent) if p_recent else 0.5
+        else:
+            p_win_pct = p_net = p_form = None
+
+        if rs and rs["games"] > 0:
+            r_win_pct = rs["wins"] / rs["games"]
+            r_net = (rs["pts_for"] - rs["pts_against"]) / rs["games"]
+            r_recent = rs["recent_scores"][-10:]
+            r_form = sum(1 for s in r_recent if s > 0) / len(r_recent) if r_recent else 0.5
+        else:
+            r_win_pct = r_net = r_form = None
+
+        if p_win_pct is not None and r_win_pct is not None:
+            win_pct = PLAYOFF_WEIGHT * p_win_pct + REGULAR_SEASON_WEIGHT * r_win_pct
+            net_rating = PLAYOFF_WEIGHT * p_net + REGULAR_SEASON_WEIGHT * r_net
+            recent_form = PLAYOFF_WEIGHT * p_form + REGULAR_SEASON_WEIGHT * r_form
+        elif p_win_pct is not None:
+            win_pct = p_win_pct
+            net_rating = p_net
+            recent_form = p_form
+        elif r_win_pct is not None:
+            win_pct = r_win_pct * 0.5
+            net_rating = r_net * 0.5
+            recent_form = r_form * 0.5
+        else:
             continue
-        recent = ts["recent_scores"][-10:]
+
+        p_wins = ps["wins"] if ps else 0
+        p_losses = ps["losses"] if ps else 0
+
         ratings[name] = {
-            "wins": ts["wins"],
-            "losses": ts["losses"],
-            "win_pct": ts["wins"] / ts["games"],
-            "net_rating": (ts["pts_for"] - ts["pts_against"]) / ts["games"],
-            "recent_form": sum(1 for s in recent if s > 0) / len(recent) if recent else 0.5,
-            "games": ts["games"],
+            "wins": p_wins,
+            "losses": p_losses,
+            "win_pct": win_pct,
+            "net_rating": net_rating,
+            "recent_form": recent_form,
+            "games": (ps["games"] if ps else 0) + (rs["games"] if rs else 0),
+            "playoff_games": ps["games"] if ps else 0,
+            "regular_season_record": f"{rs['wins']}-{rs['losses']}" if rs else "N/A",
         }
+
+    if not ratings:
+        return None
 
     _compute_power_scores(ratings)
     _save_ratings_cache("nba", ratings)
     return ratings
+
+
+# ---------------------------------------------------------------------------
+# NBA Playoff Bracket — detects active matchups from recent games
+# ---------------------------------------------------------------------------
+
+_bracket_cache: tuple[float, str] | None = None
+BRACKET_CACHE_TTL = 6 * 3600
+
+
+def _fetch_nba_playoff_bracket() -> str | None:
+    """Detect active playoff matchups from recent postseason games."""
+    global _bracket_cache
+    now = time.time()
+    if _bracket_cache and (now - _bracket_cache[0]) < BRACKET_CACHE_TTL:
+        return _bracket_cache[1]
+
+    bdl_key = os.environ.get("BALLDONTLIE_API_KEY", "")
+    headers = {"Authorization": bdl_key} if bdl_key else {}
+
+    try:
+        resp = httpx.get(
+            "https://api.balldontlie.io/v1/games",
+            params={
+                "seasons[]": 2025,
+                "per_page": 100,
+                "postseason": "true",
+            },
+            headers=headers,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        games = resp.json().get("data", [])
+    except Exception as e:
+        log.debug("BallDontLie bracket error: %s", e)
+        return None
+
+    if not games:
+        return None
+
+    matchups: dict[tuple, dict] = {}
+    for game in games:
+        home = game.get("home_team", {}).get("full_name", "")
+        away = game.get("visitor_team", {}).get("full_name", "")
+        home_score = game.get("home_team_score", 0)
+        away_score = game.get("visitor_team_score", 0)
+        if not home_score and not away_score:
+            continue
+
+        pair = tuple(sorted([home, away]))
+        if pair not in matchups:
+            matchups[pair] = {"teams": pair, "games": 0, "wins": {pair[0]: 0, pair[1]: 0}}
+        m = matchups[pair]
+        m["games"] += 1
+        if home_score > away_score:
+            m["wins"][home] = m["wins"].get(home, 0) + 1
+        else:
+            m["wins"][away] = m["wins"].get(away, 0) + 1
+
+    if not matchups:
+        return None
+
+    active = [(pair, m) for pair, m in matchups.items() if m["games"] < 7 and max(m["wins"].values()) < 4]
+    completed = [(pair, m) for pair, m in matchups.items() if max(m["wins"].values()) >= 4]
+
+    lines = ["NBA Playoff Bracket (2025):"]
+
+    if active:
+        lines.append("  Active series:")
+        for pair, m in sorted(active, key=lambda x: -x[1]["games"]):
+            t1, t2 = pair
+            lines.append(f"    {t1} vs {t2} — Series: {m['wins'][t1]}-{m['wins'][t2]}")
+
+    if completed:
+        lines.append("  Completed series:")
+        for pair, m in completed:
+            t1, t2 = pair
+            winner = t1 if m["wins"][t1] > m["wins"][t2] else t2
+            loser = t2 if winner == t1 else t1
+            lines.append(f"    {winner} def. {loser} ({m['wins'][winner]}-{m['wins'][loser]})")
+
+    result = "\n".join(lines)
+    _bracket_cache = (now, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# NBA Injury Reports — via Tavily search
+# ---------------------------------------------------------------------------
+
+_injury_cache: tuple[float, str] | None = None
+INJURY_CACHE_TTL = 4 * 3600
+
+
+def _fetch_nba_injuries() -> str | None:
+    """Fetch current NBA injury reports via Tavily search."""
+    global _injury_cache
+    now = time.time()
+    if _injury_cache and (now - _injury_cache[0]) < INJURY_CACHE_TTL:
+        return _injury_cache[1]
+
+    if not _tavily_client:
+        return None
+
+    try:
+        response = _tavily_client.search(
+            query="NBA playoff injury report today 2025",
+            search_depth="basic",
+            max_results=5,
+            include_answer=False,
+        )
+        results = response.get("results", [])
+        if not results:
+            return None
+
+        lines = ["NBA Injury Report (recent):"]
+        for r in results:
+            title = r.get("title", "")
+            snippet = r.get("content", "")[:300]
+            lines.append(f"  - {title}")
+            if snippet:
+                lines.append(f"    {snippet}")
+
+        result = "\n".join(lines)
+        _injury_cache = (now, result)
+        return result
+    except Exception as e:
+        log.debug("Tavily injury fetch error: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +1057,14 @@ def fetch_sports_context(question: str) -> str | None:
         table = _format_ratings_table(ratings, teams, question, "NBA", NBA_CONFERENCES)
         if table:
             sections.append(f"\n{table}")
+
+        bracket = _fetch_nba_playoff_bracket()
+        if bracket:
+            sections.append(f"\n{bracket}")
+
+        injuries = _fetch_nba_injuries()
+        if injuries:
+            sections.append(f"\n{injuries}")
 
     elif sport_key == "icehockey_nhl":
         ratings = _fetch_nhl_power_ratings()
