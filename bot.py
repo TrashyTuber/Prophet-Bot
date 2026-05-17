@@ -43,9 +43,10 @@ STARTING_CASH = 10_000
 KELLY_FRACTION = 0.30
 MAX_CASH_PCT_PER_TRADE = 0.07
 MAX_NOTIONAL_PER_MARKET = 1_000
-MAX_TOTAL_DEPLOYED_PCT = 0.85
+MAX_TOTAL_DEPLOYED_PCT = 1.00
 MAX_EXISTING_POSITION_PCT = 0.15
-MAX_INTENTS_PER_TICK = 15
+MAX_INTENTS_PER_TICK = 10
+MAX_OPEN_POSITIONS = 30
 JUDGE_ENABLED = os.environ.get("JUDGE_ENABLED", "1") != "0"
 JUDGE_FINALISTS_PER_TICK = int(os.environ.get("JUDGE_FINALISTS_PER_TICK", "7"))
 MAX_TEAM_EXPOSURE_PCT = 0.10
@@ -188,7 +189,7 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="eval_thechuds",
+            slug="test_thechuds_pre_eval",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
             n_ticks=1500,
@@ -243,8 +244,10 @@ def run():
                     else:
                         held_families_no.add(fam)
 
-            log.info("Tick claimed — %d markets, cash=%.2f, equity=%.2f, deployed=%.0f%%",
-                     len(markets), available_cash, equity, total_deployed / equity * 100)
+            open_position_count = len(positions_by_market)
+            log.info("Tick claimed — %d markets, cash=%.2f, equity=%.2f, deployed=%.0f%%, positions=%d/%d",
+                     len(markets), available_cash, equity, total_deployed / equity * 100,
+                     open_position_count, MAX_OPEN_POSITIONS)
 
             intents = []
             trade_records = []
@@ -435,6 +438,10 @@ def run():
                     log.info("  RISK SKIP %s — total deployment would exceed %.0f%%", market.market_id, MAX_TOTAL_DEPLOYED_PCT * 100)
                     continue
 
+                if market.market_id not in positions_by_market and open_position_count >= MAX_OPEN_POSITIONS:
+                    log.info("  RISK SKIP %s — at max open positions (%d)", market.market_id, MAX_OPEN_POSITIONS)
+                    continue
+
                 if (existing_mv + proposed_notional) > MAX_NOTIONAL_PER_MARKET:
                     log.info("  RISK SKIP %s — would exceed $%d per-market limit", market.market_id, MAX_NOTIONAL_PER_MARKET)
                     continue
@@ -454,6 +461,8 @@ def run():
 
                 total_deployed += proposed_notional
                 corr_tracker.record(market, proposed_notional)
+                if market.market_id not in positions_by_market:
+                    open_position_count += 1
                 if side == "YES":
                     held_families_yes.add(family)
                 else:
