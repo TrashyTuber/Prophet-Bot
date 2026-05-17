@@ -19,7 +19,8 @@ log = logging.getLogger(__name__)
 EDGE_THRESHOLD_DEFAULT = 0.10
 EDGE_THRESHOLD_WITH_DATA = 0.07
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
-EDGE_THRESHOLD_SPORTS_WITH_DATA = 0.04
+EDGE_THRESHOLD_SPORTS_WITH_DATA = 0.03
+EDGE_THRESHOLD_NEWS_ONLY = 0.08
 
 EDGE_CAP = 0.15
 
@@ -41,6 +42,10 @@ SHRINKAGE_WEIGHTS = {
     "weather_no_data": 0.50,
     "economics_with_data": 0.50,
     "economics_no_data": 0.35,
+    "politics_with_data": 0.45,
+    "politics_no_data": 0.30,
+    "entertainment_with_data": 0.45,
+    "entertainment_no_data": 0.30,
     "default": 0.50,
 }
 JUDGE_SHRINKAGE_WEIGHTS = {
@@ -50,6 +55,10 @@ JUDGE_SHRINKAGE_WEIGHTS = {
     "weather_no_data": 0.70,
     "economics_with_data": 0.70,
     "economics_no_data": 0.55,
+    "politics_with_data": 0.60,
+    "politics_no_data": 0.45,
+    "entertainment_with_data": 0.60,
+    "entertainment_no_data": 0.45,
     "default": 0.70,
 }
 MAX_DAYS_TO_RESOLUTION = 75
@@ -68,7 +77,7 @@ _http_session.mount("https://", HTTPAdapter(max_retries=_retry))
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
-NEWS_DAYS_THRESHOLD = 14.0
+NEWS_DAYS_THRESHOLD = 30.0
 CACHE_PRICE_TOLERANCE = 0.02
 
 _estimate_cache = {}
@@ -549,9 +558,14 @@ def _fetch_external_data_for_market(market, market_type, days_left):
     elif market_type == "sports":
         external_data = fetch_sports_context(market.question)
 
-    news = _fetch_news(market.question, days_left)
-    if news:
-        external_data = f"{external_data}\n\n{news}" if external_data else news
+    needs_news = (
+        market_type in ("politics", "entertainment")
+        or days_left <= NEWS_DAYS_THRESHOLD
+    )
+    if needs_news:
+        news = _fetch_news(market.question, days_left if market_type not in ("politics", "entertainment") else NEWS_DAYS_THRESHOLD)
+        if news:
+            external_data = f"{external_data}\n\n{news}" if external_data else news
 
     _external_data_cache[cache_key] = external_data
     return external_data
@@ -562,6 +576,8 @@ def _edge_threshold(market_type, external_data):
         return EDGE_THRESHOLD_WEATHER_WITH_DATA
     if market_type == "sports" and external_data:
         return EDGE_THRESHOLD_SPORTS_WITH_DATA
+    if market_type in ("politics", "entertainment") and external_data:
+        return EDGE_THRESHOLD_NEWS_ONLY
     if external_data:
         return EDGE_THRESHOLD_WITH_DATA
     return EDGE_THRESHOLD_DEFAULT
@@ -696,8 +712,13 @@ def analyze_market(market):
 
     market_type = _classify_market(market)
 
-    if market_type in ("general", "politics", "entertainment"):
+    if market_type == "general":
         log.info("[STRATEGY] SKIP %s type=%s — no data advantage", market.market_id, market_type)
+        return None, None, None
+
+    if market_type in ("politics", "entertainment") and days_left > NEWS_DAYS_THRESHOLD:
+        log.info("[STRATEGY] SKIP %s type=%s — resolves in %.0f days, too far for news-only",
+                 market.market_id, market_type, days_left)
         return None, None, None
 
     external_data = _fetch_external_data_for_market(market, market_type, days_left)
