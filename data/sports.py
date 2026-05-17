@@ -24,6 +24,25 @@ _tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else Non
 ODDS_BASE_URL = "https://api.the-odds-api.com/v4"
 ODDS_CACHE_TTL = 4 * 3600  # 4 hours — championship odds barely move
 
+OUTRIGHT_SPORT_KEYS = {
+    "basketball_nba": "basketball_nba_championship_winner",
+    "icehockey_nhl": "icehockey_nhl_championship_winner",
+    "baseball_mlb": "baseball_mlb_world_series_winner",
+    "americanfootball_nfl": "americanfootball_nfl_super_bowl_winner",
+    "soccer_epl": "soccer_epl_winner",
+    "soccer_spain_la_liga": "soccer_spain_la_liga_winner",
+    "soccer_germany_bundesliga": "soccer_germany_bundesliga_winner",
+    "soccer_italy_serie_a": "soccer_italy_serie_a_winner",
+    "soccer_uefa_champs_league": "soccer_uefa_champs_league_winner",
+    "soccer_fifa_world_cup": "soccer_fifa_world_cup_winner",
+}
+
+CHAMPIONSHIP_KEYWORDS = [
+    "win the", "champion", "title", "finals", "world series",
+    "stanley cup", "super bowl", "conference", "premier league",
+    "la liga", "serie a", "bundesliga", "world cup",
+]
+
 _odds_cache: dict[str, tuple[float, list]] = {}  # sport_key -> (timestamp, events)
 _ratings_cache: dict[str, tuple[float, dict]] = {}  # "nba"/"nhl"/"mlb" -> (timestamp, ratings)
 RATINGS_TTL = 6 * 3600
@@ -572,6 +591,83 @@ def _fetch_odds_raw(sport_key: str) -> list:
 
     _odds_cache[sport_key] = (now, events)
     return events
+
+
+def _is_championship_question(question: str) -> bool:
+    q = question.lower()
+    return any(kw in q for kw in CHAMPIONSHIP_KEYWORDS)
+
+
+def _fetch_outright_odds(sport_key: str, teams: list[str]) -> str | None:
+    outright_key = OUTRIGHT_SPORT_KEYS.get(sport_key)
+    if not outright_key or not ODDS_API_KEY:
+        return None
+
+    now = time.time()
+    cache_key = f"outright_{outright_key}"
+    cached = _odds_cache.get(cache_key)
+    if cached and (now - cached[0]) < ODDS_CACHE_TTL:
+        events = cached[1]
+    else:
+        try:
+            resp = httpx.get(
+                f"{ODDS_BASE_URL}/sports/{outright_key}/odds",
+                params={
+                    "apiKey": ODDS_API_KEY,
+                    "regions": "us,eu",
+                    "markets": "outrights",
+                    "oddsFormat": "american",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            events = resp.json()
+            remaining = resp.headers.get("x-requests-remaining", "?")
+            log.info("Odds API outrights: fetched %s (%d events, %s remaining)",
+                     outright_key, len(events), remaining)
+        except Exception as e:
+            log.warning("Odds API outright error for %s: %s", outright_key, e)
+            return None
+        _odds_cache[cache_key] = (now, events)
+
+    if not events:
+        return None
+
+    team_odds: dict[str, list[float]] = {}
+    for event in events:
+        for bm in event.get("bookmakers", [])[:8]:
+            for market in bm.get("markets", []):
+                if market.get("key") != "outrights":
+                    continue
+                for outcome in market.get("outcomes", []):
+                    name = outcome.get("name", "")
+                    price = outcome.get("price", 0)
+                    if name not in team_odds:
+                        team_odds[name] = []
+                    team_odds[name].append(price)
+
+    if not team_odds:
+        return None
+
+    lines = ["Outright championship odds (bookmaker consensus):"]
+    sorted_teams = sorted(
+        team_odds.items(),
+        key=lambda x: _american_odds_to_implied_prob(int(sum(x[1]) / len(x[1]))),
+        reverse=True,
+    )
+
+    shown = set()
+    for name, odds_list in sorted_teams:
+        avg_odds = sum(odds_list) / len(odds_list)
+        impl_prob = _american_odds_to_implied_prob(int(avg_odds))
+        is_relevant = any(t.lower() in name.lower() or name.lower() in t.lower() for t in teams)
+        if is_relevant or impl_prob >= 0.03 or len(shown) < 8:
+            lines.append(f"  {name}: avg {avg_odds:+.0f} (implied {impl_prob:.1%}) [{len(odds_list)} books]")
+            shown.add(name)
+            if is_relevant:
+                lines.append(f"    ^ THIS IS THE TEAM IN THE MARKET QUESTION")
+
+    return "\n".join(lines) if len(lines) > 1 else None
 
 
 def _format_odds(events: list, teams: list[str]) -> str | None:
@@ -1395,6 +1491,12 @@ def fetch_sports_context(question: str) -> str | None:
     label = sport_info["label"]
 
     sections = [f"Sports data for {label}:"]
+    is_championship = _is_championship_question(question)
+
+    if is_championship:
+        outright_data = _fetch_outright_odds(sport_key, teams)
+        if outright_data:
+            sections.append(f"\n{outright_data}")
 
     events = _fetch_odds_raw(sport_key)
     odds_data = _format_odds(events, teams)
@@ -1405,7 +1507,8 @@ def fetch_sports_context(question: str) -> str | None:
             if odds_data:
                 break
     if odds_data:
-        sections.append(f"\nBookmaker consensus odds:{odds_data}")
+        prefix = "Upcoming match odds (NOT outright winner odds)" if is_championship else "Bookmaker consensus odds"
+        sections.append(f"\n{prefix}:{odds_data}")
 
     if sport_key == "basketball_nba":
         ratings = _fetch_nba_power_ratings()
