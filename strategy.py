@@ -633,7 +633,7 @@ def review_trade_candidate(market, action, side, edge):
         },
     ]
 
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             response = client.chat.completions.create(
                 model=OPENROUTER_JUDGE_MODEL,
@@ -668,7 +668,8 @@ def review_trade_candidate(market, action, side, edge):
         except Exception as e:
             log.warning("[JUDGE] LLM error on %s (attempt %d): %s", market.market_id, attempt + 1, e)
 
-    return None
+    log.warning("[JUDGE] All retries failed for %s — falling back to scout (edge=%.2f)", market.market_id, edge)
+    return (action, side, edge)
 
 
 def analyze_market(market):
