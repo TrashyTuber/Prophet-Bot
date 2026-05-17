@@ -42,7 +42,7 @@ CONFIG_HASH = hashlib.sha256(
 STARTING_CASH = 10_000
 KELLY_FRACTION = 0.30
 MAX_CASH_PCT_PER_TRADE = 0.07
-MAX_NOTIONAL_PER_MARKET = 1_500
+MAX_NOTIONAL_PER_MARKET = 1_000
 MAX_TOTAL_DEPLOYED_PCT = 0.85
 MAX_EXISTING_POSITION_PCT = 0.15
 MAX_INTENTS_PER_TICK = 15
@@ -188,10 +188,10 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="claude-bot-competition-v3",
+            slug="eval_thechuds",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
-            n_ticks=1344,
+            n_ticks=1500,
         )
         participant = session.upsert_participant(
             model="custom:prophet-bot",
