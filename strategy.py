@@ -659,7 +659,7 @@ def review_trade_candidate(market, action, side, edge):
         },
     ]
 
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             response = client.chat.completions.create(
                 model=OPENROUTER_JUDGE_MODEL,
