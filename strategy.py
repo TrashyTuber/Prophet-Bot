@@ -17,9 +17,24 @@ load_dotenv(override=True)
 log = logging.getLogger(__name__)
 
 EDGE_THRESHOLD_DEFAULT = 0.10
-EDGE_THRESHOLD_WITH_DATA = 0.05
+EDGE_THRESHOLD_WITH_DATA = 0.07
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
 EDGE_THRESHOLD_SPORTS_WITH_DATA = 0.04
+
+PROB_FLOOR = 0.05
+PROB_CEILING = 0.95
+
+# How much to trust the model vs the market price (higher = more model trust)
+# Calibrated from backtest: sports w/ data is strong, economics is weak
+SHRINKAGE_WEIGHTS = {
+    "sports_with_data": 0.80,
+    "sports_no_data": 0.55,
+    "weather_with_data": 0.65,
+    "weather_no_data": 0.50,
+    "economics_with_data": 0.50,
+    "economics_no_data": 0.35,
+    "default": 0.50,
+}
 MAX_DAYS_TO_RESOLUTION = 75
 OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
@@ -101,6 +116,14 @@ SPORTS_KEYWORDS = [
     "golden knights", "sabres", "canadiens", "arsenal", "man city",
     "oklahoma city", "san antonio", "cleveland",
 ]
+
+def _calibrate(raw_prob, implied_prob, market_type, has_data):
+    """Apply shrinkage toward market price and clamp to avoid extreme predictions."""
+    key = f"{market_type}_{'with' if has_data else 'no'}_data"
+    model_weight = SHRINKAGE_WEIGHTS.get(key, SHRINKAGE_WEIGHTS["default"])
+    blended = model_weight * raw_prob + (1.0 - model_weight) * implied_prob
+    return max(PROB_FLOOR, min(PROB_CEILING, blended))
+
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
@@ -541,9 +564,12 @@ def analyze_market(market):
             "reasoning": reasoning,
         }
 
+    raw_prob = estimated_prob
+    estimated_prob = _calibrate(raw_prob, implied_prob, market_type, external_data is not None)
+
     log.info(
-        "[STRATEGY] %s | implied=%.2f estimated=%.2f | %s",
-        market.market_id, implied_prob, estimated_prob, reasoning,
+        "[STRATEGY] %s | implied=%.2f raw=%.2f calibrated=%.2f | %s",
+        market.market_id, implied_prob, raw_prob, estimated_prob, reasoning,
     )
 
     if market_type == "weather" and external_data:
