@@ -26,6 +26,12 @@ EDGE_CAP = 0.15
 PROB_FLOOR = 0.05
 PROB_CEILING = 0.95
 
+# Calibration on 2068 markets showed the model over-predicts in the 80-100%
+# bucket by 5.8% (vs ~2% in every other bucket). Pull blended probabilities
+# above HIGH_PROB_BAND partway back toward the band to close that gap.
+HIGH_PROB_BAND = 0.75
+HIGH_PROB_SHRINK = 0.5
+
 # How much to trust the model vs the market price (higher = more model trust)
 # Calibrated from backtest: sports w/ data is strong, economics is weak
 SHRINKAGE_WEIGHTS = {
@@ -137,6 +143,8 @@ def _calibrate(raw_prob, implied_prob, market_type, has_data, weights=None):
     key = f"{market_type}_{'with' if has_data else 'no'}_data"
     model_weight = weights.get(key, weights["default"])
     blended = model_weight * raw_prob + (1.0 - model_weight) * implied_prob
+    if blended > HIGH_PROB_BAND:
+        blended = HIGH_PROB_BAND + (blended - HIGH_PROB_BAND) * HIGH_PROB_SHRINK
     return max(PROB_FLOOR, min(PROB_CEILING, blended))
 
 
