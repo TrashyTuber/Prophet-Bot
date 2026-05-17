@@ -62,18 +62,22 @@ ECON_KEYWORDS = {
 
 WEATHER_KEYWORDS = [
     "temperature", "weather", "rain", "snow", "precipitation",
-    "heat", "cold", "storm", "hurricane", "tornado", "wind",
+    "heat wave", "cold wave", "tornado", "wind speed",
     "celsius", "fahrenheit", "degrees",
 ]
 
 SPORTS_KEYWORDS = [
-    "nba", "nfl", "mlb", "nhl", "mls", "ufc", "mma", "ncaa",
+    "nba", "nfl", "mlb", "nhl", "mls", "ufc", "mma", "ncaa", "wnba",
     "basketball", "football", "baseball", "hockey", "soccer", "tennis",
     "premier league", "epl", "champions league", "la liga", "serie a",
-    "bundesliga", "game", "match", "playoff", "finals", "championship",
-    "win", "beat", "score", "points", "touchdown", "home run",
+    "bundesliga", "world cup", "stanley cup", "super bowl",
+    "playoff", "finals", "championship", "pro basketball", "pro football",
+    "pro baseball", "win the 202",
     "lakers", "celtics", "warriors", "yankees", "dodgers", "chiefs",
-    "eagles", "cowboys", "patriots", "49ers",
+    "eagles", "cowboys", "patriots", "49ers", "knicks", "thunder",
+    "cavaliers", "pistons", "spurs", "avalanche", "hurricanes",
+    "golden knights", "sabres", "canadiens", "arsenal", "man city",
+    "oklahoma city", "san antonio", "cleveland",
 ]
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -107,22 +111,32 @@ def _fetch_news(question, days_left):
         return None
 
 
+SPORTS_FAMILIES = {
+    "kxnba", "kxnbaeast", "kxnbawest", "kxnhl", "kxmlb", "kxmlbnl",
+    "kxsb", "kxmenworldcup", "kxpremierleague", "kxucl", "kxwnba",
+    "kxwnbamvp", "kxnflmvp", "kxgameawards",
+}
+
+
 def _classify_market(market):
     question_lower = market.question.lower()
     topic = (market.topic or "").lower()
     family = (market.family or "").lower()
 
-    for keyword in WEATHER_KEYWORDS:
+    if family in SPORTS_FAMILIES:
+        return "sports"
+
+    for keyword in SPORTS_KEYWORDS:
         if keyword in question_lower or keyword in topic:
-            return "weather"
+            return "sports"
 
     for keyword in ECON_KEYWORDS:
         if keyword in question_lower or keyword in topic:
             return "economics"
 
-    for keyword in SPORTS_KEYWORDS:
+    for keyword in WEATHER_KEYWORDS:
         if keyword in question_lower or keyword in topic:
-            return "sports"
+            return "weather"
 
     return "general"
 

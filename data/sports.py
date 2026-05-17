@@ -302,6 +302,28 @@ NHL_TEAMS = {
 
 ALL_TEAMS = {**NBA_TEAMS, **MLB_TEAMS, **NFL_TEAMS, **NHL_TEAMS}
 
+MARKET_CITY_TO_TEAM = {
+    "oklahoma city": ("Oklahoma City Thunder", "nba"),
+    "san antonio": ("San Antonio Spurs", "nba"),
+    "new york": ("New York Knicks", "nba"),
+    "cleveland": ("Cleveland Cavaliers", "nba"),
+    "detroit": ("Detroit Pistons", "nba"),
+    "los angeles d": ("Los Angeles Dodgers", "mlb"),
+    "los angeles r": ("Los Angeles Rams", "nfl"),
+    "los angeles c": ("Los Angeles Chargers", "nfl"),
+    "new york y": ("New York Yankees", "mlb"),
+    "new york g": ("New York Giants", "nfl"),
+    "chicago c": ("Chicago Cubs", "mlb"),
+    "chicago ws": ("Chicago White Sox", "mlb"),
+    "tampa bay": ("Tampa Bay Rays", "mlb"),
+    "colorado avalanche": ("Colorado Avalanche", "nhl"),
+    "carolina hurricanes": ("Carolina Hurricanes", "nhl"),
+    "vegas golden knights": ("Vegas Golden Knights", "nhl"),
+    "buffalo sabres": ("Buffalo Sabres", "nhl"),
+    "montréal canadiens": ("Montréal Canadiens", "nhl"),
+    "montreal canadiens": ("Montréal Canadiens", "nhl"),
+}
+
 
 def _detect_sport(question: str) -> dict | None:
     question_lower = question.lower()
@@ -318,6 +340,9 @@ def _detect_sport(question: str) -> dict | None:
                 return SPORT_KEYWORDS["nfl"]
             if team in NHL_TEAMS:
                 return SPORT_KEYWORDS["nhl"]
+    for city, (_, sport) in MARKET_CITY_TO_TEAM.items():
+        if city in question_lower:
+            return SPORT_KEYWORDS[sport]
     return None
 
 
@@ -326,6 +351,9 @@ def _extract_teams(question: str) -> list[str]:
     found = []
     for nickname, full_name in ALL_TEAMS.items():
         if nickname in question_lower and full_name not in found:
+            found.append(full_name)
+    for city, (full_name, _) in MARKET_CITY_TO_TEAM.items():
+        if city in question_lower and full_name not in found:
             found.append(full_name)
     return found
 
