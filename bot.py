@@ -49,7 +49,7 @@ MAX_INTENTS_PER_TICK = 10
 MAX_OPEN_POSITIONS = 30
 TICK_TIME_BUDGET_SEC = 7 * 60
 JUDGE_ENABLED = os.environ.get("JUDGE_ENABLED", "1") != "0"
-JUDGE_FINALISTS_PER_TICK = int(os.environ.get("JUDGE_FINALISTS_PER_TICK", "4"))
+JUDGE_FINALISTS_PER_TICK = int(os.environ.get("JUDGE_FINALISTS_PER_TICK", "5"))
 MAX_TEAM_EXPOSURE_PCT = 0.10
 MAX_GAME_EXPOSURE_PCT = 0.08
 MAX_LEAGUE_EXPOSURE_PCT = 0.30
@@ -405,12 +405,34 @@ def run():
                 log.info("Judge enabled — reviewing top %d candidate(s) with %s",
                          JUDGE_FINALISTS_PER_TICK, OPENROUTER_JUDGE_MODEL)
 
+            judge_count = 0
             for rank, (market, action, side, edge, shares, family) in enumerate(ranked_candidates, start=1):
                 scout_edge = edge
 
+                if len(intents) >= MAX_INTENTS_PER_TICK:
+                    log.info("  RISK SKIP %s — already at %d intents (max per tick)", market.market_id, MAX_INTENTS_PER_TICK)
+                    break
+
+                existing_mv = position_value.get(market.market_id, 0.0)
+
+                if market.market_id not in positions_by_market and open_position_count >= MAX_OPEN_POSITIONS:
+                    log.info("  PRE-SKIP %s — at max open positions (%d)", market.market_id, MAX_OPEN_POSITIONS)
+                    continue
+
+                if existing_mv / equity > MAX_EXISTING_POSITION_PCT:
+                    log.info("  PRE-SKIP %s — existing position already %.0f%% of equity", market.market_id, existing_mv / equity * 100)
+                    continue
+
+                scout_cost = float(market.quote.best_ask) if side == "YES" else 1.0 - float(market.quote.best_bid)
+                scout_notional = shares * scout_cost
+                if (existing_mv + scout_notional) > MAX_NOTIONAL_PER_MARKET:
+                    log.info("  PRE-SKIP %s — scout sizing $%.0f would exceed $%d per-market limit",
+                             market.market_id, existing_mv + scout_notional, MAX_NOTIONAL_PER_MARKET)
+                    continue
+
                 if JUDGE_ENABLED:
-                    if rank > JUDGE_FINALISTS_PER_TICK:
-                        log.info("  JUDGE SKIP %s — outside top %d scout candidates",
+                    if judge_count >= JUDGE_FINALISTS_PER_TICK:
+                        log.info("  JUDGE SKIP %s — already judged %d candidates",
                                  market.market_id, JUDGE_FINALISTS_PER_TICK)
                         continue
 
@@ -419,6 +441,7 @@ def run():
                         log.warning("  JUDGE SKIP %s — tick time budget exhausted (%.0fs)", market.market_id, elapsed)
                         continue
 
+                    judge_count += 1
                     reviewed = review_trade_candidate(market, action, side, scout_edge)
                     if reviewed is None:
                         log.info("  JUDGE REJECT %s %s on %s (scout edge=%.2f)",
@@ -445,26 +468,14 @@ def run():
                     log.info("  RISK SKIP %s — total deployment would exceed %.0f%%", market.market_id, MAX_TOTAL_DEPLOYED_PCT * 100)
                     continue
 
-                if market.market_id not in positions_by_market and open_position_count >= MAX_OPEN_POSITIONS:
-                    log.info("  RISK SKIP %s — at max open positions (%d)", market.market_id, MAX_OPEN_POSITIONS)
-                    continue
-
                 if (existing_mv + proposed_notional) > MAX_NOTIONAL_PER_MARKET:
                     log.info("  RISK SKIP %s — would exceed $%d per-market limit", market.market_id, MAX_NOTIONAL_PER_MARKET)
-                    continue
-
-                if existing_mv / equity > MAX_EXISTING_POSITION_PCT:
-                    log.info("  RISK SKIP %s — existing position already %.0f%% of equity", market.market_id, existing_mv / equity * 100)
                     continue
 
                 corr_ok, corr_reason = corr_tracker.check(market, proposed_notional)
                 if not corr_ok:
                     log.info("  CORR SKIP %s — %s", market.market_id, corr_reason)
                     continue
-
-                if len(intents) >= MAX_INTENTS_PER_TICK:
-                    log.info("  RISK SKIP %s — already at %d intents (max per tick)", market.market_id, MAX_INTENTS_PER_TICK)
-                    break
 
                 total_deployed += proposed_notional
                 corr_tracker.record(market, proposed_notional)
