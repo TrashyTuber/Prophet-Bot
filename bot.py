@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -54,6 +55,7 @@ STOP_LOSS_PCT = -0.25
 TAKE_PROFIT_MIN_PNL_PCT = 0.075
 RESOLUTION_BOOST_DAYS = 14
 RESOLUTION_BOOST_MAX = 2.0
+VARIANCE_FACTOR_CAP = 2.0
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
     "timestamp", "market_id", "market_type", "action", "side", "shares",
@@ -62,7 +64,7 @@ TRADES_FIELDS = [
 ]
 
 
-def compute_shares(edge: float, side: str, market, available_cash: float) -> int:
+def compute_shares(edge: float, side: str, market, available_cash: float, estimated_prob: float) -> int:
     if side == "YES":
         cost = float(market.quote.best_ask)
     else:
@@ -79,8 +81,11 @@ def compute_shares(edge: float, side: str, market, available_cash: float) -> int
     else:
         time_mult = RESOLUTION_BOOST_MAX - (RESOLUTION_BOOST_MAX - 1.0) * (days_left - RESOLUTION_BOOST_DAYS) / (MAX_DAYS_TO_RESOLUTION - RESOLUTION_BOOST_DAYS)
 
+    variance = max(estimated_prob * (1.0 - estimated_prob), 1e-4)
+    variance_factor = min(VARIANCE_FACTOR_CAP, 0.5 / math.sqrt(variance))
+
     kelly_fraction = KELLY_FRACTION * edge / (1.0 - cost)
-    cash_fraction = min(kelly_fraction * time_mult, MAX_CASH_PCT_PER_TRADE * time_mult)
+    cash_fraction = min(kelly_fraction * time_mult * variance_factor, MAX_CASH_PCT_PER_TRADE * time_mult)
     return int(available_cash * cash_fraction / cost)
 
 
@@ -348,7 +353,7 @@ def run():
                     continue
 
                 action, side, edge = decision
-                shares = compute_shares(edge, side, market, available_cash)
+                shares = compute_shares(edge, side, market, available_cash, estimated_prob)
                 if shares <= 0:
                     log.info("  SKIP %s %s on %s (edge=%.2f) — sized to 0 shares", action, side, market.market_id, edge)
                     continue
@@ -389,7 +394,12 @@ def run():
                         continue
 
                     action, side, edge = reviewed
-                    shares = compute_shares(edge, side, market, available_cash)
+                    if side == "YES":
+                        judged_prob = float(market.quote.best_ask) + edge
+                    else:
+                        judged_prob = float(market.quote.best_bid) - edge
+                    judged_prob = max(0.01, min(0.99, judged_prob))
+                    shares = compute_shares(edge, side, market, available_cash, judged_prob)
                     if shares <= 0:
                         log.info("  SKIP %s %s on %s (judged edge=%.2f) — sized to 0 shares",
                                  action, side, market.market_id, edge)
