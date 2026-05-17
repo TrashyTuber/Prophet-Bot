@@ -502,11 +502,10 @@ def _parse_json_object(text):
     brace_idx = text.find("{")
     if brace_idx >= 0:
         partial = text[brace_idx:]
-        # Truncate reasoning at last complete key-value and close
         for key in ("reasoning", "reason"):
             trunc = re.search(rf'"{key}"\s*:\s*"[^"]*$', partial)
             if trunc:
-                partial = partial[:trunc.start()] .rstrip(", ") + "}"
+                partial = partial[:trunc.start()].rstrip(", ") + "}"
                 return json.loads(partial)
     return json.loads(text)
 
