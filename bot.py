@@ -185,7 +185,7 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="claude-bot-competition-v2",
+            slug="claude-bot-competition-v3",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
             n_ticks=1344,

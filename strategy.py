@@ -497,7 +497,16 @@ def _parse_json_object(text):
         text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     match = re.search(r'\{[^}]+\}', text)
     if match:
-        text = match.group(0)
+        return json.loads(match.group(0))
+    # Handle truncated JSON: find opening brace and try to close it
+    brace_idx = text.find("{")
+    if brace_idx >= 0:
+        partial = text[brace_idx:]
+        for key in ("reasoning", "reason"):
+            trunc = re.search(rf'"{key}"\s*:\s*"[^"]*$', partial)
+            if trunc:
+                partial = partial[:trunc.start()].rstrip(", ") + "}"
+                return json.loads(partial)
     return json.loads(text)
 
 
@@ -628,7 +637,7 @@ def review_trade_candidate(market, action, side, edge):
         try:
             response = client.chat.completions.create(
                 model=OPENROUTER_JUDGE_MODEL,
-                max_tokens=256,
+                max_tokens=512,
                 messages=messages,
             )
 
