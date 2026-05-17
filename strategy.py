@@ -488,13 +488,13 @@ def analyze_market(market):
     if days_left > MAX_DAYS_TO_RESOLUTION:
         log.info("[STRATEGY] SKIP %s — resolves in %.0f days (max %d)",
                  market.market_id, days_left, MAX_DAYS_TO_RESOLUTION)
-        return None
+        return None, None, None
 
     market_type = _classify_market(market)
 
     if market_type in ("general", "politics", "entertainment"):
         log.info("[STRATEGY] SKIP %s type=%s — no data advantage", market.market_id, market_type)
-        return None
+        return None, None, None
 
     external_data = None
 
@@ -556,7 +556,7 @@ def analyze_market(market):
             except (json.JSONDecodeError, KeyError, TypeError) as e:
                 log.warning("[STRATEGY] Parse error on %s (attempt %d): %s", market.market_id, attempt + 1, e)
                 if attempt == 1:
-                    return None
+                    return None, None, None
 
         _estimate_cache[market.market_id] = {
             "implied_prob": implied_prob,
@@ -587,7 +587,7 @@ def analyze_market(market):
     log.info("[STRATEGY] %s | threshold=%.2f", market.market_id, threshold)
 
     if yes_edge > threshold:
-        return ("BUY", "YES", yes_edge)
+        return ("BUY", "YES", yes_edge), estimated_prob, threshold
     elif no_edge > threshold:
-        return ("BUY", "NO", no_edge)
-    return None
+        return ("BUY", "NO", no_edge), estimated_prob, threshold
+    return None, estimated_prob, threshold

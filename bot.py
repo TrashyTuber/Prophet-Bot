@@ -37,6 +37,7 @@ MAX_TEAM_EXPOSURE_PCT = 0.10
 MAX_GAME_EXPOSURE_PCT = 0.08
 MAX_LEAGUE_EXPOSURE_PCT = 0.30
 STOP_LOSS_PCT = -0.25
+TAKE_PROFIT_MIN_PNL_PCT = 0.075
 NEAR_RESOLUTION_DAYS = 60
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
@@ -247,7 +248,7 @@ def run():
                     continue
 
                 try:
-                    decision = analyze_market(market)
+                    decision, estimated_prob, edge_threshold = analyze_market(market)
                 except Exception:
                     log.exception("Strategy error on %s", market.market_id)
                     continue
@@ -281,6 +282,47 @@ def run():
                             "notional": "",
                         })
                         continue
+
+                if (existing_pos and float(existing_pos.shares) > 0 and decision is None
+                        and estimated_prob is not None and edge_threshold is not None):
+                    entry_cost = float(existing_pos.shares) * float(existing_pos.avg_entry_price)
+                    if entry_cost > 0:
+                        pnl_pct = float(existing_pos.unrealized_pnl) / entry_cost
+                        if pnl_pct >= TAKE_PROFIT_MIN_PNL_PCT:
+                            if existing_pos.side == "YES":
+                                remaining_edge = estimated_prob - float(market.quote.best_ask)
+                            else:
+                                remaining_edge = float(market.quote.best_bid) - estimated_prob
+                            sell_fraction = max(0.0, min(1.0, 1.0 - remaining_edge / edge_threshold))
+                            held_shares = int(float(existing_pos.shares))
+                            sell_shares = int(held_shares * sell_fraction)
+                            if sell_shares > 0:
+                                exit_price = float(market.quote.best_bid) if existing_pos.side == "YES" else 1.0 - float(market.quote.best_ask)
+                                log.info("  TAKE-PROFIT SELL %s %d/%d shares on %s (pnl=%.0f%%, rem_edge=%.3f, thr=%.3f, frac=%.2f)",
+                                         existing_pos.side, sell_shares, held_shares, market.market_id,
+                                         pnl_pct * 100, remaining_edge, edge_threshold, sell_fraction)
+                                intents.append(TradeIntentRequest(
+                                    market_id=market.market_id,
+                                    action="SELL",
+                                    side=existing_pos.side,
+                                    shares=str(sell_shares),
+                                    idempotency_key="",
+                                ))
+                                trade_records.append({
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "market_id": market.market_id,
+                                    "market_type": _classify_market(market),
+                                    "action": "SELL",
+                                    "side": existing_pos.side,
+                                    "shares": sell_shares,
+                                    "edge": round(remaining_edge, 4),
+                                    "implied_prob": round(exit_price, 4),
+                                    "estimated_prob": round(estimated_prob, 4),
+                                    "status": "pending",
+                                    "fill_price": "",
+                                    "notional": "",
+                                })
+                                continue
 
                 if decision is None:
                     continue
