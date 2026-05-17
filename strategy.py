@@ -77,7 +77,7 @@ ECON_KEYWORDS = {
 
 WEATHER_KEYWORDS = [
     "temperature", "weather", "rain", "snow", "precipitation",
-    "heat", "cold", "storm", "hurricane", "tornado", "wind",
+    "heat wave", "cold wave", "tornado", "wind speed",
     "celsius", "fahrenheit", "degrees",
 ]
 
@@ -104,13 +104,17 @@ SPORTS_KEYWORDS = [
     "nba", "nfl", "mlb", "nhl", "mls", "ufc", "mma", "ncaa", "wnba",
     "basketball", "football", "baseball", "hockey", "soccer", "tennis",
     "premier league", "epl", "champions league", "la liga", "serie a",
-    "bundesliga", "playoff", "finals", "championship",
-    "super bowl", "world series", "stanley cup", "world cup", "fifa",
+    "bundesliga", "world cup", "fifa", "stanley cup", "super bowl", "world series",
+    "playoff", "finals", "championship", "pro basketball", "pro football",
+    "pro baseball", "win the 202",
     "touchdown", "home run", "three-pointer", "field goal",
     "quarterback", "pitcher", "goalkeeper", "striker",
     "halftime", "inning", "overtime", "penalty kick",
     "lakers", "celtics", "warriors", "yankees", "dodgers", "chiefs",
-    "eagles", "cowboys", "patriots", "49ers",
+    "eagles", "cowboys", "patriots", "49ers", "knicks", "thunder",
+    "cavaliers", "pistons", "spurs", "avalanche", "hurricanes",
+    "golden knights", "sabres", "canadiens", "arsenal", "man city",
+    "oklahoma city", "san antonio", "cleveland",
 ]
 
 def _calibrate(raw_prob, implied_prob, market_type, has_data):
@@ -152,14 +156,24 @@ def _fetch_news(question, days_left):
         return None
 
 
+SPORTS_FAMILIES = {
+    "kxnba", "kxnbaeast", "kxnbawest", "kxnhl", "kxmlb", "kxmlbnl",
+    "kxsb", "kxmenworldcup", "kxpremierleague", "kxucl", "kxwnba",
+    "kxwnbamvp", "kxnflmvp", "kxgameawards",
+}
+
+
 def _classify_market(market):
     question_lower = market.question.lower()
     topic = (market.topic or "").lower()
     family = (market.family or "").lower()
 
-    for keyword in WEATHER_KEYWORDS:
+    if family in SPORTS_FAMILIES:
+        return "sports"
+
+    for keyword in SPORTS_KEYWORDS:
         if keyword in question_lower or keyword in topic:
-            return "weather"
+            return "sports"
 
     for keyword in ECON_KEYWORDS:
         if keyword in question_lower or keyword in topic:
@@ -173,9 +187,9 @@ def _classify_market(market):
         if keyword in question_lower or keyword in topic or keyword in family:
             return "entertainment"
 
-    for keyword in SPORTS_KEYWORDS:
-        if keyword in question_lower or keyword in topic or keyword in family:
-            return "sports"
+    for keyword in WEATHER_KEYWORDS:
+        if keyword in question_lower or keyword in topic:
+            return "weather"
 
     return "general"
 

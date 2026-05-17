@@ -36,8 +36,8 @@ MAX_INTENTS_PER_TICK = 10
 MAX_TEAM_EXPOSURE_PCT = 0.10
 MAX_GAME_EXPOSURE_PCT = 0.08
 MAX_LEAGUE_EXPOSURE_PCT = 0.30
-STOP_LOSS_PCT = -0.30
-TAKE_PROFIT_PCT = 0.20
+STOP_LOSS_PCT = -0.25
+NEAR_RESOLUTION_DAYS = 60
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
     "timestamp", "market_id", "market_type", "action", "side", "shares",
@@ -213,11 +213,13 @@ def run():
                     entry_cost = float(existing_pos.shares) * float(existing_pos.avg_entry_price)
                     if entry_cost > 0:
                         pnl_pct = float(existing_pos.unrealized_pnl) / entry_cost
-                        if pnl_pct <= STOP_LOSS_PCT or pnl_pct >= TAKE_PROFIT_PCT:
+                        days_to_res = (market.resolution_time - datetime.now(timezone.utc)).total_seconds() / 86400
+                        near_resolution = days_to_res <= NEAR_RESOLUTION_DAYS
+                        should_stop = pnl_pct <= STOP_LOSS_PCT and not near_resolution
+                        if should_stop:
                             sell_shares = int(float(existing_pos.shares))
-                            reason = "STOP-LOSS" if pnl_pct < 0 else "TAKE-PROFIT"
-                            log.info("  %s SELL %s %d shares on %s (pnl=%.0f%%)",
-                                     reason, existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
+                            log.info("  STOP-LOSS SELL %s %d shares on %s (pnl=%.0f%%)",
+                                     existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
                             intents.append(TradeIntentRequest(
                                 market_id=market.market_id,
                                 action="SELL",

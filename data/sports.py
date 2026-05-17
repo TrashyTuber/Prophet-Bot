@@ -431,6 +431,28 @@ WORLD_CUP_CONFEDERATIONS = {
 
 ALL_TEAMS = {**NBA_TEAMS, **MLB_TEAMS, **NFL_TEAMS, **NHL_TEAMS, **WORLD_CUP_TEAMS}
 
+MARKET_CITY_TO_TEAM = {
+    "oklahoma city": ("Oklahoma City Thunder", "nba"),
+    "san antonio": ("San Antonio Spurs", "nba"),
+    "new york": ("New York Knicks", "nba"),
+    "cleveland": ("Cleveland Cavaliers", "nba"),
+    "detroit": ("Detroit Pistons", "nba"),
+    "los angeles d": ("Los Angeles Dodgers", "mlb"),
+    "los angeles r": ("Los Angeles Rams", "nfl"),
+    "los angeles c": ("Los Angeles Chargers", "nfl"),
+    "new york y": ("New York Yankees", "mlb"),
+    "new york g": ("New York Giants", "nfl"),
+    "chicago c": ("Chicago Cubs", "mlb"),
+    "chicago ws": ("Chicago White Sox", "mlb"),
+    "tampa bay": ("Tampa Bay Rays", "mlb"),
+    "colorado avalanche": ("Colorado Avalanche", "nhl"),
+    "carolina hurricanes": ("Carolina Hurricanes", "nhl"),
+    "vegas golden knights": ("Vegas Golden Knights", "nhl"),
+    "buffalo sabres": ("Buffalo Sabres", "nhl"),
+    "montréal canadiens": ("Montréal Canadiens", "nhl"),
+    "montreal canadiens": ("Montréal Canadiens", "nhl"),
+}
+
 
 def _detect_sport(question: str) -> dict | None:
     question_lower = question.lower()
@@ -449,6 +471,9 @@ def _detect_sport(question: str) -> dict | None:
                 return SPORT_KEYWORDS["nhl"]
             if team in WORLD_CUP_TEAMS:
                 return SPORT_KEYWORDS["world cup"]
+    for city, (_, sport) in MARKET_CITY_TO_TEAM.items():
+        if city in question_lower:
+            return SPORT_KEYWORDS[sport]
     return None
 
 
@@ -457,6 +482,9 @@ def _extract_teams(question: str) -> list[str]:
     found = []
     for nickname, full_name in ALL_TEAMS.items():
         if nickname in question_lower and full_name not in found:
+            found.append(full_name)
+    for city, (full_name, _) in MARKET_CITY_TO_TEAM.items():
+        if city in question_lower and full_name not in found:
             found.append(full_name)
     return found
 
@@ -1184,8 +1212,8 @@ def _fetch_world_cup_power_ratings() -> dict[str, dict] | None:
         # Normalize — Brazil has max history_raw = 5*5 + 7*2 + 12*1 + 15*0.5 = 58.5
         history_score = min(history_raw / 40.0, 1.0)
 
-        # Composite: 30% FIFA rank, 25% history, 45% squad quality (current form)
-        win_pct = 0.30 * rank_score + 0.25 * history_score + 0.45 * squad
+        # Composite: 25% FIFA rank, 15% history, 60% squad quality (current form)
+        win_pct = 0.25 * rank_score + 0.15 * history_score + 0.60 * squad
         net_rating = (rank_score - 0.5) * 10.0  # synthetic scale for display
         recent_form = squad  # squad quality is our best proxy for current form
 
