@@ -107,7 +107,50 @@ SPORT_KEYWORDS = {
     },
     "tennis": {
         "odds_key": "tennis_atp_french_open",
+        "odds_keys_fallback": [
+            "tennis_atp_wimbledon",
+            "tennis_atp_us_open",
+            "tennis_atp_australian_open",
+            "tennis_wta_french_open",
+            "tennis_wta_wimbledon",
+            "tennis_wta_us_open",
+            "tennis_wta_australian_open",
+        ],
         "label": "Tennis",
+    },
+    "atp": {
+        "odds_key": "tennis_atp_french_open",
+        "odds_keys_fallback": [
+            "tennis_atp_wimbledon",
+            "tennis_atp_us_open",
+            "tennis_atp_australian_open",
+        ],
+        "label": "ATP Tennis",
+    },
+    "wta": {
+        "odds_key": "tennis_wta_french_open",
+        "odds_keys_fallback": [
+            "tennis_wta_wimbledon",
+            "tennis_wta_us_open",
+            "tennis_wta_australian_open",
+        ],
+        "label": "WTA Tennis",
+    },
+    "wimbledon": {
+        "odds_key": "tennis_atp_wimbledon",
+        "label": "Wimbledon",
+    },
+    "french open": {
+        "odds_key": "tennis_atp_french_open",
+        "label": "French Open",
+    },
+    "us open": {
+        "odds_key": "tennis_atp_us_open",
+        "label": "US Open",
+    },
+    "australian open": {
+        "odds_key": "tennis_atp_australian_open",
+        "label": "Australian Open",
     },
     "ncaa": {
         "odds_key": "basketball_ncaab",
@@ -1183,6 +1226,100 @@ def _fetch_mlb_power_ratings() -> dict[str, dict] | None:
 
 
 # ---------------------------------------------------------------------------
+# NFL Power Ratings — ESPN public API (free, no key)
+# ---------------------------------------------------------------------------
+
+NFL_CONFERENCES = {
+    "AFC": [],
+    "NFC": [],
+}
+
+ESPN_CONF_MAP = {
+    "American Football Conference": "AFC",
+    "National Football Conference": "NFC",
+}
+
+
+def _fetch_nfl_power_ratings() -> dict[str, dict] | None:
+    cached = _get_cached_ratings("nfl")
+    if cached:
+        return cached
+
+    try:
+        client = httpx.Client(follow_redirects=True, timeout=15)
+        resp = client.get(
+            "https://site.api.espn.com/apis/v2/sports/football/nfl/standings",
+            params={"season": 2025},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        client.close()
+    except Exception as e:
+        log.warning("ESPN NFL API error: %s", e)
+        return None
+
+    conferences = data.get("children", [])
+    if not conferences:
+        return None
+
+    NFL_CONFERENCES["AFC"] = []
+    NFL_CONFERENCES["NFC"] = []
+
+    ratings = {}
+    for conf in conferences:
+        conf_name = ESPN_CONF_MAP.get(conf.get("name", ""), "")
+        entries = conf.get("standings", {}).get("entries", [])
+
+        for entry in entries:
+            name = entry.get("team", {}).get("displayName", "")
+            if not name:
+                continue
+
+            if conf_name in NFL_CONFERENCES:
+                NFL_CONFERENCES[conf_name].append(name)
+
+            stats = {s["name"]: s.get("value", 0) for s in entry.get("stats", []) if "name" in s}
+            wins = int(stats.get("wins", 0))
+            losses = int(stats.get("losses", 0))
+            pf = stats.get("pointsFor", 0)
+            pa = stats.get("pointsAgainst", 0)
+            gp = wins + losses + int(stats.get("ties", 0))
+
+            if gp == 0:
+                continue
+
+            net_rating = (pf - pa) / gp
+            win_pct = wins / gp
+
+            if pf > 0 and pa > 0:
+                pyth_pct = pf ** 2.37 / (pf ** 2.37 + pa ** 2.37)
+            else:
+                pyth_pct = win_pct
+
+            recent_form = pyth_pct
+
+            ratings[name] = {
+                "wins": wins,
+                "losses": losses,
+                "win_pct": win_pct,
+                "net_rating": net_rating,
+                "recent_form": recent_form,
+                "games": gp,
+                "points_for": pf,
+                "points_against": pa,
+                "pyth_pct": pyth_pct,
+            }
+
+    if not ratings:
+        return None
+
+    _compute_power_scores(ratings)
+    _save_ratings_cache("nfl", ratings)
+    log.info("NFL power ratings: %d teams computed", len(ratings))
+    return ratings
+
+
+# ---------------------------------------------------------------------------
 # World Cup Power Ratings — hardcoded from FIFA rankings, history, squad quality
 # ---------------------------------------------------------------------------
 
@@ -1261,6 +1398,12 @@ def fetch_sports_context(question: str) -> str | None:
 
     events = _fetch_odds_raw(sport_key)
     odds_data = _format_odds(events, teams)
+    if not odds_data and "odds_keys_fallback" in sport_info:
+        for fallback_key in sport_info["odds_keys_fallback"]:
+            events = _fetch_odds_raw(fallback_key)
+            odds_data = _format_odds(events, teams)
+            if odds_data:
+                break
     if odds_data:
         sections.append(f"\nBookmaker consensus odds:{odds_data}")
 
@@ -1277,6 +1420,13 @@ def fetch_sports_context(question: str) -> str | None:
         injuries = _fetch_nba_injuries()
         if injuries:
             sections.append(f"\n{injuries}")
+
+    elif sport_key in ("americanfootball_nfl", "americanfootball_ncaaf"):
+        if sport_key == "americanfootball_nfl":
+            ratings = _fetch_nfl_power_ratings()
+            table = _format_ratings_table(ratings, teams, question, "NFL", NFL_CONFERENCES, diff_label="PD/GP")
+            if table:
+                sections.append(f"\n{table}")
 
     elif sport_key == "icehockey_nhl":
         ratings = _fetch_nhl_power_ratings()

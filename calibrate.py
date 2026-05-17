@@ -44,6 +44,7 @@ from strategy import (
     PROB_FLOOR,
     PROB_CEILING,
     MAX_DAYS_TO_RESOLUTION,
+    EDGE_CAP,
 )
 from openai import OpenAI
 
@@ -193,8 +194,9 @@ class MockMarket:
             self.resolution_time = self.resolution_time.replace(tzinfo=timezone.utc)
 
 
-def predict_scout(market, category):
+def predict_scout(market, category, model_override=None):
     """Run the scout model on a market. Returns (raw_prob, reasoning) or None."""
+    scout_model = model_override or OPENROUTER_SCOUT_MODEL
     implied_prob = float(market.quote.best_ask)
     market_type = category
 
@@ -204,8 +206,6 @@ def predict_scout(market, category):
         days_left = 14.0
 
     external_data = None
-    # Skip external data for historical markets — we can't fetch past forecasts
-    # But news search might still work for recent events
 
     user_msg = _build_user_message(market, implied_prob, external_data)
 
@@ -224,7 +224,7 @@ def predict_scout(market, category):
     for attempt in range(2):
         try:
             response = client.chat.completions.create(
-                model=OPENROUTER_SCOUT_MODEL,
+                model=scout_model,
                 max_tokens=256,
                 messages=messages,
             )
@@ -254,24 +254,39 @@ def predict_judge(market, category, scout_side, scout_edge, scout_probability):
     return True, judged_prob, "approved"
 
 
+KELLY_FRACTION = 0.25
+MAX_CASH_PCT = 0.05
+
+
+def _kelly_weight(edge, cost):
+    """Compute fractional Kelly weight for a trade, matching bot.py sizing logic."""
+    if cost <= 0 or cost >= 1 or edge <= 0:
+        return 0.0
+    kelly = KELLY_FRACTION * edge / (1.0 - cost)
+    cost_penalty = min(1.0, (1.0 - cost) / 0.40) if cost > 0.60 else 1.0
+    return min(kelly * cost_penalty, MAX_CASH_PCT * cost_penalty)
+
+
 def simulate_trade(estimated_prob, implied_prob, outcome, category, has_data):
     """Simulate a trade decision and compute return."""
     threshold = _edge_threshold(category, has_data)
-    yes_edge = estimated_prob - implied_prob
-    no_edge = (1.0 - implied_prob) - estimated_prob
+    yes_edge = min(estimated_prob - implied_prob, EDGE_CAP)
+    no_edge = min((1.0 - implied_prob) - estimated_prob, EDGE_CAP)
 
     if yes_edge > threshold:
-        # Buy YES at implied_prob, pays 1.0 if outcome=1
         cost = implied_prob
         payout = 1.0 if outcome == 1 else 0.0
+        weight = _kelly_weight(yes_edge, cost)
         return {"action": "BUY_YES", "cost": cost, "payout": payout,
-                "return": (payout - cost) / cost, "edge": yes_edge}
+                "return": (payout - cost) / cost, "edge": yes_edge,
+                "kelly_weight": weight}
     elif no_edge > threshold:
-        # Buy NO at (1 - implied_prob), pays 1.0 if outcome=0
         cost = 1.0 - implied_prob
         payout = 1.0 if outcome == 0 else 0.0
+        weight = _kelly_weight(no_edge, cost)
         return {"action": "BUY_NO", "cost": cost, "payout": payout,
-                "return": (payout - cost) / cost, "edge": no_edge}
+                "return": (payout - cost) / cost, "edge": no_edge,
+                "kelly_weight": weight}
 
     return None
 
@@ -373,6 +388,16 @@ def print_report(title, predictions, trades):
         print(f"  Total payout:    ${total_payout:.2f}")
         print(f"  Net P&L:         ${total_payout - total_invested:+.2f} ({(total_payout/total_invested - 1)*100:+.1f}%)")
 
+        if any("kelly_weight" in t for t in trades):
+            kelly_invested = sum(t["kelly_weight"] * t["cost"] for t in trades if "kelly_weight" in t)
+            kelly_payout = sum(t["kelly_weight"] * t["payout"] for t in trades if "kelly_weight" in t)
+            if kelly_invested > 0:
+                kelly_pnl_pct = (kelly_payout / kelly_invested - 1) * 100
+                print(f"\n  Kelly-weighted (simulates real sizing):")
+                print(f"  Weighted invested: ${kelly_invested:.2f}")
+                print(f"  Weighted payout:   ${kelly_payout:.2f}")
+                print(f"  Weighted P&L:      ${kelly_payout - kelly_invested:+.2f} ({kelly_pnl_pct:+.1f}%)")
+
         # By category
         trades_by_cat = {}
         for t in trades:
@@ -414,8 +439,11 @@ def run_calibration(args):
     if args.limit:
         all_markets = all_markets[:args.limit]
 
+    scout_model = args.scout_model or OPENROUTER_SCOUT_MODEL
+    model_tag = scout_model.split("/")[-1]
+
     log.info("Running calibration on %d markets (scout=%s, judge=%s)",
-             len(all_markets), OPENROUTER_SCOUT_MODEL,
+             len(all_markets), scout_model,
              OPENROUTER_JUDGE_MODEL if args.judge else "disabled")
 
     scout_predictions = []
@@ -430,8 +458,8 @@ def run_calibration(args):
         implied_prob = m["yes_ask"]
         outcome = m["outcome"]
 
-        # Check cache
-        cache_key = f"scout_{market_id}"
+        # Check cache (keyed by model to allow A/B comparison)
+        cache_key = f"scout_{model_tag}_{market_id}"
         if cache_key in cache:
             raw_prob = cache[cache_key]["raw_prob"]
             reasoning = cache[cache_key]["reasoning"]
@@ -439,7 +467,7 @@ def run_calibration(args):
             log.info("[%d/%d] Scout: %s (cat=%s, implied=%.2f)",
                      i + 1, len(all_markets), market_id, category, implied_prob)
 
-            result = predict_scout(market, category)
+            result = predict_scout(market, category, model_override=scout_model)
             if result is None:
                 continue
 
@@ -514,7 +542,7 @@ def run_calibration(args):
     save_cache(cache)
 
     # Reports
-    print_report(f"SCOUT ONLY ({OPENROUTER_SCOUT_MODEL})", scout_predictions, scout_trades)
+    print_report(f"SCOUT ONLY ({scout_model})", scout_predictions, scout_trades)
 
     if args.judge:
         print_report(f"SCOUT + JUDGE ({OPENROUTER_JUDGE_MODEL})", judge_predictions, judge_trades)
@@ -536,7 +564,7 @@ def run_calibration(args):
     # Save full results
     results = {
         "config": {
-            "scout_model": OPENROUTER_SCOUT_MODEL,
+            "scout_model": scout_model,
             "judge_model": OPENROUTER_JUDGE_MODEL if args.judge else None,
             "category_filter": args.category,
             "n_markets": len(all_markets),
@@ -565,5 +593,6 @@ if __name__ == "__main__":
     parser.add_argument("--category", type=str, help="Filter to category (sports, economics, weather, etc.)")
     parser.add_argument("--limit", type=int, help="Max number of markets to evaluate")
     parser.add_argument("--resume", action="store_true", help="Resume from cached predictions")
+    parser.add_argument("--scout-model", type=str, help="Override scout model (e.g. anthropic/claude-sonnet-4, x-ai/grok-3)")
     args = parser.parse_args()
     run_calibration(args)

@@ -84,8 +84,11 @@ def compute_shares(edge: float, side: str, market, available_cash: float, estima
     variance = max(estimated_prob * (1.0 - estimated_prob), 1e-4)
     variance_factor = min(VARIANCE_FACTOR_CAP, 0.5 / math.sqrt(variance))
 
+    # Penalize expensive trades: at cost=0.60 → 1.0x, cost=0.80 → 0.5x, cost=0.95 → 0.125x
+    cost_penalty = min(1.0, (1.0 - cost) / 0.40) if cost > 0.60 else 1.0
+
     kelly_fraction = KELLY_FRACTION * edge / (1.0 - cost)
-    cash_fraction = min(kelly_fraction * time_mult * variance_factor, MAX_CASH_PCT_PER_TRADE * time_mult)
+    cash_fraction = min(kelly_fraction * time_mult * variance_factor * cost_penalty, MAX_CASH_PCT_PER_TRADE * time_mult * cost_penalty)
     return int(available_cash * cash_fraction / cost)
 
 
