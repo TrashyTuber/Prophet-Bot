@@ -156,10 +156,10 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="claude-bot-v11",
+            slug="claude-bot-competition-v1",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
-            n_ticks=96,
+            n_ticks=1344,
         )
         participant = session.upsert_participant(
             model="custom:claude-bot",
