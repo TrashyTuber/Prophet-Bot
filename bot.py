@@ -162,7 +162,7 @@ def run():
             n_ticks=1344,
         )
         participant = session.upsert_participant(
-            model="custom:claude-bot",
+            model="custom:prophet-bot-v1.0",
             starting_cash=STARTING_CASH,
         )
 
