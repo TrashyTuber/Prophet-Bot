@@ -507,22 +507,28 @@ def run():
             session.put_plan(lease, participant.participant_idx, CONFIG)
 
             if intents:
-                result = session.submit_intents(lease, participant.participant_idx, intents)
-                filled = {f.market_id: f for f in result.fills}
-                for record in trade_records:
-                    fill = filled.get(record["market_id"])
-                    if fill:
-                        record["status"] = "filled"
-                        record["fill_price"] = fill.price
-                        record["notional"] = fill.notional
-                    else:
-                        record["status"] = "rejected"
-                _log_trades(trade_records)
-                log.info("Submitted %d intents: %d accepted, %d rejected", len(intents), result.accepted, result.rejected)
+                try:
+                    result = session.submit_intents(lease, participant.participant_idx, intents)
+                    filled = {f.market_id: f for f in result.fills}
+                    for record in trade_records:
+                        fill = filled.get(record["market_id"])
+                        if fill:
+                            record["status"] = "filled"
+                            record["fill_price"] = fill.price
+                            record["notional"] = fill.notional
+                        else:
+                            record["status"] = "rejected"
+                    _log_trades(trade_records)
+                    log.info("Submitted %d intents: %d accepted, %d rejected", len(intents), result.accepted, result.rejected)
+                except Exception as e:
+                    log.error("submit_intents failed: %s — skipping tick", e)
             else:
                 log.info("No trades this tick.")
 
-            session.finalize(lease, participant.participant_idx)
+            try:
+                session.finalize(lease, participant.participant_idx)
+            except Exception as e:
+                log.warning("finalize failed: %s — continuing", e)
             try:
                 session.complete_tick(lease)
             except Exception:
