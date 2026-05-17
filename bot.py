@@ -15,7 +15,7 @@ load_dotenv(override=True)
 from ai_prophet_core import ServerAPIClient, TradeIntentRequest
 from ai_prophet_core.arena import BenchmarkSession
 
-from strategy import analyze_market, _classify_market
+from strategy import analyze_market, _classify_market, MAX_DAYS_TO_RESOLUTION
 from data.sports import _extract_teams, _detect_sport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -38,7 +38,6 @@ MAX_GAME_EXPOSURE_PCT = 0.08
 MAX_LEAGUE_EXPOSURE_PCT = 0.30
 STOP_LOSS_PCT = -0.25
 TAKE_PROFIT_MIN_PNL_PCT = 0.075
-NEAR_RESOLUTION_DAYS = 60
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
     "timestamp", "market_id", "market_type", "action", "side", "shares",
@@ -46,6 +45,9 @@ TRADES_FIELDS = [
     "status", "fill_price", "notional",
 ]
 
+
+RESOLUTION_BOOST_DAYS = 14
+RESOLUTION_BOOST_MAX = 2.0
 
 def compute_shares(edge: float, side: str, market, available_cash: float) -> int:
     if side == "YES":
@@ -56,8 +58,16 @@ def compute_shares(edge: float, side: str, market, available_cash: float) -> int
     if cost <= 0 or cost >= 1 or edge <= 0 or available_cash <= 0:
         return 0
 
+    days_left = (market.resolution_time - datetime.now(timezone.utc)).total_seconds() / 86400
+    if days_left <= RESOLUTION_BOOST_DAYS:
+        time_mult = RESOLUTION_BOOST_MAX
+    elif days_left >= MAX_DAYS_TO_RESOLUTION:
+        time_mult = 0.5
+    else:
+        time_mult = RESOLUTION_BOOST_MAX - (RESOLUTION_BOOST_MAX - 1.0) * (days_left - RESOLUTION_BOOST_DAYS) / (MAX_DAYS_TO_RESOLUTION - RESOLUTION_BOOST_DAYS)
+
     kelly_fraction = KELLY_FRACTION * edge / (1.0 - cost)
-    cash_fraction = min(kelly_fraction, MAX_CASH_PCT_PER_TRADE)
+    cash_fraction = min(kelly_fraction * time_mult, MAX_CASH_PCT_PER_TRADE * time_mult)
     return int(available_cash * cash_fraction / cost)
 
 
@@ -214,10 +224,7 @@ def run():
                     entry_cost = float(existing_pos.shares) * float(existing_pos.avg_entry_price)
                     if entry_cost > 0:
                         pnl_pct = float(existing_pos.unrealized_pnl) / entry_cost
-                        days_to_res = (market.resolution_time - datetime.now(timezone.utc)).total_seconds() / 86400
-                        near_resolution = days_to_res <= NEAR_RESOLUTION_DAYS
-                        should_stop = pnl_pct <= STOP_LOSS_PCT and not near_resolution
-                        if should_stop:
+                        if pnl_pct <= STOP_LOSS_PCT:
                             sell_shares = int(float(existing_pos.shares))
                             log.info("  STOP-LOSS SELL %s %d shares on %s (pnl=%.0f%%)",
                                      existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
