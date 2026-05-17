@@ -232,6 +232,17 @@ def run():
             markets_by_id = {m.market_id: m for m in markets}
             corr_tracker = CorrelationTracker(equity, positions_by_market, markets_by_id)
 
+            held_families_yes = set()
+            held_families_no = set()
+            for mid, pos in positions_by_market.items():
+                m = markets_by_id.get(mid)
+                if m and float(pos.shares) > 0:
+                    fam = getattr(m, "family", None) or mid
+                    if pos.side == "YES":
+                        held_families_yes.add(fam)
+                    else:
+                        held_families_no.add(fam)
+
             log.info("Tick claimed — %d markets, cash=%.2f, equity=%.2f, deployed=%.0f%%",
                      len(markets), available_cash, equity, total_deployed / equity * 100)
 
@@ -362,6 +373,14 @@ def run():
                     continue
 
                 family = getattr(market, "family", None) or market.market_id
+
+                if side == "YES" and family in held_families_yes and market.market_id not in positions_by_market:
+                    log.info("  MUTUAL-EXCL SKIP %s — already hold YES in family %s", market.market_id, family)
+                    continue
+                if side == "NO" and family in held_families_no and market.market_id not in positions_by_market:
+                    log.info("  MUTUAL-EXCL SKIP %s — already hold NO in family %s", market.market_id, family)
+                    continue
+
                 buy_candidates.append((market, action, side, edge, shares, family))
 
             # Deduplicate: keep only the best edge per family
@@ -435,6 +454,10 @@ def run():
 
                 total_deployed += proposed_notional
                 corr_tracker.record(market, proposed_notional)
+                if side == "YES":
+                    held_families_yes.add(family)
+                else:
+                    held_families_no.add(family)
 
                 implied_prob = float(market.quote.best_ask)
                 if side == "YES":
