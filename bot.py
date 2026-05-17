@@ -189,7 +189,7 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="test_thechuds_pre_eval",
+            slug="eval_thechuds",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
             n_ticks=1500,
