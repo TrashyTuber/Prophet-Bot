@@ -1212,8 +1212,8 @@ def _fetch_world_cup_power_ratings() -> dict[str, dict] | None:
         # Normalize — Brazil has max history_raw = 5*5 + 7*2 + 12*1 + 15*0.5 = 58.5
         history_score = min(history_raw / 40.0, 1.0)
 
-        # Composite: 30% FIFA rank, 25% history, 45% squad quality (current form)
-        win_pct = 0.30 * rank_score + 0.25 * history_score + 0.45 * squad
+        # Composite: 25% FIFA rank, 15% history, 60% squad quality (current form)
+        win_pct = 0.25 * rank_score + 0.15 * history_score + 0.60 * squad
         net_rating = (rank_score - 0.5) * 10.0  # synthetic scale for display
         recent_form = squad  # squad quality is our best proxy for current form
 
