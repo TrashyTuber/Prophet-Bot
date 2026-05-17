@@ -15,13 +15,25 @@ load_dotenv(override=True)
 from ai_prophet_core import ServerAPIClient, TradeIntentRequest
 from ai_prophet_core.arena import BenchmarkSession
 
-from strategy import analyze_market, _classify_market, MAX_DAYS_TO_RESOLUTION
+from strategy import (
+    MAX_DAYS_TO_RESOLUTION,
+    OPENROUTER_JUDGE_MODEL,
+    OPENROUTER_SCOUT_MODEL,
+    analyze_market,
+    review_trade_candidate,
+    _classify_market,
+)
 from data.sports import _extract_teams, _detect_sport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-CONFIG = {"strategy": "claude-probability", "version": "1.0"}
+CONFIG = {
+    "strategy": "gemini-scout-gpt52-judge",
+    "version": "1.1",
+    "scout_model": OPENROUTER_SCOUT_MODEL,
+    "judge_model": OPENROUTER_JUDGE_MODEL,
+}
 CONFIG_HASH = hashlib.sha256(
     json.dumps(CONFIG, sort_keys=True).encode()
 ).hexdigest()[:16]
@@ -33,11 +45,15 @@ MAX_NOTIONAL_PER_MARKET = 1_000
 MAX_TOTAL_DEPLOYED_PCT = 0.70
 MAX_EXISTING_POSITION_PCT = 0.10
 MAX_INTENTS_PER_TICK = 10
+JUDGE_ENABLED = os.environ.get("JUDGE_ENABLED", "1") != "0"
+JUDGE_FINALISTS_PER_TICK = int(os.environ.get("JUDGE_FINALISTS_PER_TICK", "5"))
 MAX_TEAM_EXPOSURE_PCT = 0.10
 MAX_GAME_EXPOSURE_PCT = 0.08
 MAX_LEAGUE_EXPOSURE_PCT = 0.30
 STOP_LOSS_PCT = -0.25
 TAKE_PROFIT_MIN_PNL_PCT = 0.075
+RESOLUTION_BOOST_DAYS = 14
+RESOLUTION_BOOST_MAX = 2.0
 TRADES_CSV = "trades.csv"
 TRADES_FIELDS = [
     "timestamp", "market_id", "market_type", "action", "side", "shares",
@@ -45,9 +61,6 @@ TRADES_FIELDS = [
     "status", "fill_price", "notional",
 ]
 
-
-RESOLUTION_BOOST_DAYS = 14
-RESOLUTION_BOOST_MAX = 2.0
 
 def compute_shares(edge: float, side: str, market, available_cash: float) -> int:
     if side == "YES":
@@ -355,7 +368,33 @@ def run():
                 else:
                     log.info("  FAMILY SKIP %s — better edge in %s", market.market_id, best_by_family[family][0].market_id)
 
-            for market, action, side, edge, shares, family in sorted(best_by_family.values(), key=lambda x: -x[3]):
+            ranked_candidates = sorted(best_by_family.values(), key=lambda x: -x[3])
+            if JUDGE_ENABLED and ranked_candidates:
+                log.info("Judge enabled — reviewing top %d candidate(s) with %s",
+                         JUDGE_FINALISTS_PER_TICK, OPENROUTER_JUDGE_MODEL)
+
+            for rank, (market, action, side, edge, shares, family) in enumerate(ranked_candidates, start=1):
+                scout_edge = edge
+
+                if JUDGE_ENABLED:
+                    if rank > JUDGE_FINALISTS_PER_TICK:
+                        log.info("  JUDGE SKIP %s — outside top %d scout candidates",
+                                 market.market_id, JUDGE_FINALISTS_PER_TICK)
+                        continue
+
+                    reviewed = review_trade_candidate(market, action, side, scout_edge)
+                    if reviewed is None:
+                        log.info("  JUDGE REJECT %s %s on %s (scout edge=%.2f)",
+                                 action, side, market.market_id, scout_edge)
+                        continue
+
+                    action, side, edge = reviewed
+                    shares = compute_shares(edge, side, market, available_cash)
+                    if shares <= 0:
+                        log.info("  SKIP %s %s on %s (judged edge=%.2f) — sized to 0 shares",
+                                 action, side, market.market_id, edge)
+                        continue
+
                 cost = float(market.quote.best_ask) if side == "YES" else 1.0 - float(market.quote.best_bid)
                 proposed_notional = shares * cost
                 existing_mv = position_value.get(market.market_id, 0.0)

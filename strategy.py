@@ -35,8 +35,19 @@ SHRINKAGE_WEIGHTS = {
     "economics_no_data": 0.35,
     "default": 0.50,
 }
+JUDGE_SHRINKAGE_WEIGHTS = {
+    "sports_with_data": 0.92,
+    "sports_no_data": 0.75,
+    "weather_with_data": 0.85,
+    "weather_no_data": 0.70,
+    "economics_with_data": 0.70,
+    "economics_no_data": 0.55,
+    "default": 0.70,
+}
 MAX_DAYS_TO_RESOLUTION = 75
-OPENROUTER_MODEL = "google/gemini-2.5-flash"
+OPENROUTER_SCOUT_MODEL = os.environ.get("OPENROUTER_SCOUT_MODEL", "google/gemini-2.5-flash")
+OPENROUTER_JUDGE_MODEL = os.environ.get("OPENROUTER_JUDGE_MODEL", "openai/gpt-5.2")
+OPENROUTER_MODEL = OPENROUTER_SCOUT_MODEL
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -53,6 +64,7 @@ NEWS_DAYS_THRESHOLD = 14.0
 CACHE_PRICE_TOLERANCE = 0.02
 
 _estimate_cache = {}
+_external_data_cache = {}
 
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
@@ -117,10 +129,11 @@ SPORTS_KEYWORDS = [
     "oklahoma city", "san antonio", "cleveland",
 ]
 
-def _calibrate(raw_prob, implied_prob, market_type, has_data):
+def _calibrate(raw_prob, implied_prob, market_type, has_data, weights=None):
     """Apply shrinkage toward market price and clamp to avoid extreme predictions."""
+    weights = weights or SHRINKAGE_WEIGHTS
     key = f"{market_type}_{'with' if has_data else 'no'}_data"
-    model_weight = SHRINKAGE_WEIGHTS.get(key, SHRINKAGE_WEIGHTS["default"])
+    model_weight = weights.get(key, weights["default"])
     blended = model_weight * raw_prob + (1.0 - model_weight) * implied_prob
     return max(PROB_FLOOR, min(PROB_CEILING, blended))
 
@@ -478,6 +491,177 @@ def _build_user_message(market, implied_prob, external_data):
     return "\n".join(parts)
 
 
+def _parse_json_object(text):
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    match = re.search(r'\{[^}]+\}', text)
+    if match:
+        text = match.group(0)
+    return json.loads(text)
+
+
+def _json_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return bool(value)
+
+
+def _fetch_external_data_for_market(market, market_type, days_left):
+    cache_key = (
+        market.market_id,
+        market_type,
+        round(days_left, 1),
+        bool(TAVILY_API_KEY and days_left <= NEWS_DAYS_THRESHOLD),
+    )
+    if cache_key in _external_data_cache:
+        return _external_data_cache[cache_key]
+
+    external_data = None
+
+    if market_type == "economics":
+        series = _match_fred_series(market.question)
+        if series:
+            external_data = _fetch_fred_data(series)
+    elif market_type == "weather":
+        external_data = _fetch_weather_data(market.question)
+    elif market_type == "sports":
+        external_data = fetch_sports_context(market.question)
+
+    news = _fetch_news(market.question, days_left)
+    if news:
+        external_data = f"{external_data}\n\n{news}" if external_data else news
+
+    _external_data_cache[cache_key] = external_data
+    return external_data
+
+
+def _edge_threshold(market_type, external_data):
+    if market_type == "weather" and external_data:
+        return EDGE_THRESHOLD_WEATHER_WITH_DATA
+    if market_type == "sports" and external_data:
+        return EDGE_THRESHOLD_SPORTS_WITH_DATA
+    if external_data:
+        return EDGE_THRESHOLD_WITH_DATA
+    return EDGE_THRESHOLD_DEFAULT
+
+
+JUDGE_SYSTEM_PROMPT = """\
+You are the final reviewer for a prediction-market trading bot.
+
+You receive a scout model's proposed trade plus the same market data. Your job \
+is to veto weak trades and correct the probability when the scout is overconfident.
+
+Approve only if the trade still has a real edge after considering the market \
+price, external data quality, time to resolution, and calibration risk. For \
+sports markets, treat bookmaker consensus odds as the strongest signal.
+
+Respond with ONLY a JSON object:
+{"approved": <true/false>, "probability": <float 0-1>, "reasoning": "brief explanation"}
+"""
+
+
+def _build_judge_message(market, implied_prob, scout_side, scout_edge, scout_probability, external_data):
+    no_ask = 1.0 - float(market.quote.best_bid)
+    parts = [
+        f"Market: {market.question}",
+        f"Current YES ask/implied probability: {implied_prob:.2f}",
+        f"Current NO ask/implied probability: {no_ask:.2f}",
+        f"Scout recommendation: BUY {scout_side}",
+        f"Scout estimated YES probability: {scout_probability:.3f}",
+        f"Scout edge: {scout_edge:.3f}",
+    ]
+
+    if market.description:
+        parts.append(f"Description: {market.description}")
+
+    parts.append(f"Resolution: {market.resolution_time.strftime('%Y-%m-%d')}")
+
+    now = datetime.now(timezone.utc)
+    days_left = (market.resolution_time - now).total_seconds() / 86400
+    parts.append(f"Days until resolution: {days_left:.1f}")
+
+    if external_data:
+        parts.append(f"\nExternal data:\n{external_data}")
+
+    return "\n".join(parts)
+
+
+def review_trade_candidate(market, action, side, edge):
+    """Use the stronger judge model to approve or reject a scout trade."""
+    if action != "BUY":
+        return (action, side, edge)
+
+    yes_ask = float(market.quote.best_ask)
+    no_ask = 1.0 - float(market.quote.best_bid)
+    implied_prob = yes_ask
+
+    if side == "YES":
+        scout_probability = implied_prob + edge
+    else:
+        scout_probability = float(market.quote.best_bid) - edge
+    scout_probability = max(PROB_FLOOR, min(PROB_CEILING, scout_probability))
+
+    now = datetime.now(timezone.utc)
+    days_left = (market.resolution_time - now).total_seconds() / 86400
+    market_type = _classify_market(market)
+    external_data = _fetch_external_data_for_market(market, market_type, days_left)
+
+    messages = [
+        {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": _build_judge_message(
+                market,
+                implied_prob,
+                side,
+                edge,
+                scout_probability,
+                external_data,
+            ),
+        },
+    ]
+
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=OPENROUTER_JUDGE_MODEL,
+                max_tokens=256,
+                messages=messages,
+            )
+
+            result = _parse_json_object(response.choices[0].message.content or "")
+            raw_prob = float(result["probability"])
+            approved = _json_bool(result.get("approved", True))
+            reasoning = result.get("reasoning", "")
+            judged_prob = _calibrate(raw_prob, implied_prob, market_type, external_data is not None, weights=JUDGE_SHRINKAGE_WEIGHTS)
+            threshold = _edge_threshold(market_type, external_data)
+            yes_edge = judged_prob - implied_prob
+            no_edge = (1.0 - no_ask) - judged_prob
+
+            if side == "YES":
+                judged_edge = yes_edge
+            else:
+                judged_edge = no_edge
+
+            log.info(
+                "[JUDGE] %s | approved=%s side=%s raw=%.2f calibrated=%.2f edge=%.2f threshold=%.2f | %s",
+                market.market_id, approved, side, raw_prob, judged_prob, judged_edge, threshold, reasoning,
+            )
+
+            if approved and judged_edge > threshold:
+                return (action, side, judged_edge)
+            return None
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            log.warning("[JUDGE] Parse error on %s (attempt %d): %s", market.market_id, attempt + 1, e)
+        except Exception as e:
+            log.warning("[JUDGE] LLM error on %s (attempt %d): %s", market.market_id, attempt + 1, e)
+
+    return None
+
+
 def analyze_market(market):
     yes_ask = float(market.quote.best_ask)
     no_ask = 1.0 - float(market.quote.best_bid)
@@ -496,20 +680,7 @@ def analyze_market(market):
         log.info("[STRATEGY] SKIP %s type=%s — no data advantage", market.market_id, market_type)
         return None, None, None
 
-    external_data = None
-
-    if market_type == "economics":
-        series = _match_fred_series(market.question)
-        if series:
-            external_data = _fetch_fred_data(series)
-    elif market_type == "weather":
-        external_data = _fetch_weather_data(market.question)
-    elif market_type == "sports":
-        external_data = fetch_sports_context(market.question)
-
-    news = _fetch_news(market.question, days_left)
-    if news:
-        external_data = f"{external_data}\n\n{news}" if external_data else news
+    external_data = _fetch_external_data_for_market(market, market_type, days_left)
 
     cached = _estimate_cache.get(market.market_id)
     if cached and abs(cached["implied_prob"] - implied_prob) < CACHE_PRICE_TOLERANCE:
@@ -518,8 +689,8 @@ def analyze_market(market):
         log.info("[STRATEGY] CACHE HIT %s | implied=%.2f estimated=%.2f",
                  market.market_id, implied_prob, estimated_prob)
     else:
-        log.info("[STRATEGY] %s type=%s data=%s news=%s", market.market_id, market_type,
-                 "yes" if external_data else "no", "yes" if news else "no")
+        log.info("[STRATEGY] %s type=%s data=%s", market.market_id, market_type,
+                 "yes" if external_data else "no")
 
         user_msg = _build_user_message(market, implied_prob, external_data)
 
@@ -543,13 +714,7 @@ def analyze_market(market):
                     messages=messages,
                 )
 
-                text = response.choices[0].message.content.strip()
-                if text.startswith("```"):
-                    text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-                match = re.search(r'\{[^}]+\}', text)
-                if match:
-                    text = match.group(0)
-                result = json.loads(text)
+                result = _parse_json_object(response.choices[0].message.content or "")
                 estimated_prob = float(result["probability"])
                 reasoning = result.get("reasoning", "")
                 break
@@ -572,14 +737,7 @@ def analyze_market(market):
         market.market_id, implied_prob, raw_prob, estimated_prob, reasoning,
     )
 
-    if market_type == "weather" and external_data:
-        threshold = EDGE_THRESHOLD_WEATHER_WITH_DATA
-    elif market_type == "sports" and external_data:
-        threshold = EDGE_THRESHOLD_SPORTS_WITH_DATA
-    elif external_data:
-        threshold = EDGE_THRESHOLD_WITH_DATA
-    else:
-        threshold = EDGE_THRESHOLD_DEFAULT
+    threshold = _edge_threshold(market_type, external_data)
 
     yes_edge = estimated_prob - implied_prob
     no_edge = (1.0 - no_ask) - estimated_prob
