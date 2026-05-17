@@ -47,8 +47,9 @@ MAX_TOTAL_DEPLOYED_PCT = 1.00
 MAX_EXISTING_POSITION_PCT = 0.15
 MAX_INTENTS_PER_TICK = 10
 MAX_OPEN_POSITIONS = 30
+TICK_TIME_BUDGET_SEC = 7 * 60
 JUDGE_ENABLED = os.environ.get("JUDGE_ENABLED", "1") != "0"
-JUDGE_FINALISTS_PER_TICK = int(os.environ.get("JUDGE_FINALISTS_PER_TICK", "7"))
+JUDGE_FINALISTS_PER_TICK = int(os.environ.get("JUDGE_FINALISTS_PER_TICK", "4"))
 MAX_TEAM_EXPOSURE_PCT = 0.10
 MAX_GAME_EXPOSURE_PCT = 0.08
 MAX_LEAGUE_EXPOSURE_PCT = 0.30
@@ -211,6 +212,7 @@ def run():
                 time.sleep(lease.retry_after_sec or 15)
                 continue
 
+            tick_start = time.monotonic()
             tick = session.load_candidates(lease)
             lease = tick.lease
             markets = tick.candidates.markets
@@ -410,6 +412,11 @@ def run():
                     if rank > JUDGE_FINALISTS_PER_TICK:
                         log.info("  JUDGE SKIP %s — outside top %d scout candidates",
                                  market.market_id, JUDGE_FINALISTS_PER_TICK)
+                        continue
+
+                    elapsed = time.monotonic() - tick_start
+                    if elapsed > TICK_TIME_BUDGET_SEC:
+                        log.warning("  JUDGE SKIP %s — tick time budget exhausted (%.0fs)", market.market_id, elapsed)
                         continue
 
                     reviewed = review_trade_candidate(market, action, side, scout_edge)
