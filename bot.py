@@ -188,10 +188,10 @@ def run():
 
     with BenchmarkSession(api) as session:
         session.create_experiment(
-            slug="claude-bot-competition-v3",
+            slug="eval_thechuds",
             config_hash=CONFIG_HASH,
             config_json=CONFIG,
-            n_ticks=1344,
+            n_ticks=1500,
         )
         participant = session.upsert_participant(
             model="custom:prophet-bot",
