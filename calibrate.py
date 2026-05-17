@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import ast
 import json
 import logging
 import os
@@ -83,46 +84,62 @@ def load_dataset():
     return ds
 
 
+def _safe_parse(value):
+    """Parse a field that might be JSON string, Python repr string, or already parsed."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return ast.literal_eval(value)
+
+
 def parse_market_row(row):
     """Parse a dataset row into individual markets with outcomes."""
-    markets = json.loads(row["markets"]) if isinstance(row["markets"], str) else row["markets"]
-    market_outcome = json.loads(row["market_outcome"]) if isinstance(row["market_outcome"], str) else row["market_outcome"]
-    market_data = json.loads(row["market_data"]) if isinstance(row["market_data"], str) else row["market_data"]
+    markets_raw = _safe_parse(row["markets"])
+    market_outcome = _safe_parse(row["market_outcome"])
+    market_data = _safe_parse(row["market_data"])
+
+    if not isinstance(market_outcome, dict) or not isinstance(market_data, dict):
+        return []
 
     category = CATEGORY_MAP.get(row["category"], "general")
     close_time = row["close_time"]
     snapshot_time = row["snapshot_time"]
 
+    # markets_raw can be a list of strings (outcome names) or list of dicts
+    market_names = []
+    if isinstance(markets_raw, list):
+        for item in markets_raw:
+            if isinstance(item, str):
+                market_names.append(item)
+            elif isinstance(item, dict):
+                market_names.append(item.get("title") or item.get("ticker") or "")
+
+    # If markets list is empty, use keys from market_outcome
+    if not market_names:
+        market_names = list(market_outcome.keys())
+
     parsed = []
-    for mkt in markets:
-        ticker = mkt.get("ticker") or mkt.get("market_ticker", "")
-        title = mkt.get("title") or mkt.get("subtitle", "") or row["title"]
+    for name in market_names:
+        if not name:
+            continue
 
-        outcome_key = title if title in market_outcome else ticker
-        if outcome_key not in market_outcome:
-            for k in market_outcome:
-                if ticker and ticker in k:
-                    outcome_key = k
-                    break
-            else:
-                continue
+        # Match to outcome
+        if name in market_outcome:
+            outcome = market_outcome[name]
+        else:
+            continue
 
-        outcome = market_outcome[outcome_key]
+        # Match to price data
+        if name in market_data:
+            prices = market_data[name]
+        else:
+            continue
 
-        data_key = title if title in market_data else ticker
-        if data_key not in market_data:
-            for k in market_data:
-                if ticker and ticker in k:
-                    data_key = k
-                    break
-            else:
-                continue
-
-        prices = market_data[data_key]
         yes_ask = prices.get("yes_ask")
-        yes_bid = prices.get("yes_bid")
         no_ask = prices.get("no_ask")
-        no_bid = prices.get("no_bid")
+        yes_bid = prices.get("yes_bid")
 
         if yes_ask is None or no_ask is None:
             continue
@@ -134,10 +151,12 @@ def parse_market_row(row):
         if yes_ask_dec <= 0.01 or yes_ask_dec >= 0.99:
             continue
 
+        market_id = f"{row['event_ticker']}_{name[:30]}"
+
         parsed.append({
-            "market_id": f"{row['event_ticker']}_{ticker}",
+            "market_id": market_id,
             "question": row.get("augmented_title") or row["title"],
-            "subtitle": title,
+            "subtitle": name,
             "category": category,
             "yes_ask": yes_ask_dec,
             "yes_bid": yes_bid_dec,
