@@ -21,6 +21,8 @@ EDGE_THRESHOLD_WITH_DATA = 0.07
 EDGE_THRESHOLD_WEATHER_WITH_DATA = 0.03
 EDGE_THRESHOLD_SPORTS_WITH_DATA = 0.04
 
+EDGE_CAP = 0.15
+
 PROB_FLOOR = 0.05
 PROB_CEILING = 0.95
 
@@ -647,8 +649,8 @@ def review_trade_candidate(market, action, side, edge):
             reasoning = result.get("reasoning", "")
             judged_prob = _calibrate(raw_prob, implied_prob, market_type, external_data is not None, weights=JUDGE_SHRINKAGE_WEIGHTS)
             threshold = _edge_threshold(market_type, external_data)
-            yes_edge = judged_prob - implied_prob
-            no_edge = (1.0 - no_ask) - judged_prob
+            yes_edge = min(judged_prob - implied_prob, EDGE_CAP)
+            no_edge = min((1.0 - no_ask) - judged_prob, EDGE_CAP)
 
             if side == "YES":
                 judged_edge = yes_edge
@@ -749,8 +751,8 @@ def analyze_market(market):
 
     threshold = _edge_threshold(market_type, external_data)
 
-    yes_edge = estimated_prob - implied_prob
-    no_edge = (1.0 - no_ask) - estimated_prob
+    yes_edge = min(estimated_prob - implied_prob, EDGE_CAP)
+    no_edge = min((1.0 - no_ask) - estimated_prob, EDGE_CAP)
 
     log.info("[STRATEGY] %s | threshold=%.2f", market.market_id, threshold)
 
