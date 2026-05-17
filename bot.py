@@ -383,7 +383,10 @@ def run():
                 log.info("No trades this tick.")
 
             session.finalize(lease, participant.participant_idx)
-            session.complete_tick(lease)
+            try:
+                session.complete_tick(lease)
+            except Exception:
+                log.warning("complete_tick failed (likely other participants not finalized), continuing...")
 
 
 if __name__ == "__main__":
