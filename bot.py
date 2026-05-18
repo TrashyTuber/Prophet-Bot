@@ -54,7 +54,9 @@ MAX_TEAM_EXPOSURE_PCT = 0.10
 MAX_GAME_EXPOSURE_PCT = 0.08
 MAX_LEAGUE_EXPOSURE_PCT = 0.30
 STOP_LOSS_PCT = -0.25
+STOP_LOSS_IMPACT_BUFFER = 0.01  # credit back 1c/share of mechanical market impact when checking stop-loss
 TAKE_PROFIT_MIN_PNL_PCT = 0.075
+MIN_ENTRY_PRICE = 0.05  # skip trades at cost < 5c (1c market impact would dominate and 100x-payoff variance traps Kelly)
 RESOLUTION_BOOST_DAYS = 14
 RESOLUTION_BOOST_MAX = 2.0
 VARIANCE_FACTOR_CAP = 2.0
@@ -72,7 +74,7 @@ def compute_shares(edge: float, side: str, market, available_cash: float, estima
     else:
         cost = 1.0 - float(market.quote.best_bid)
 
-    if cost <= 0 or cost >= 1 or edge <= 0 or available_cash <= 0:
+    if cost <= 0 or cost >= 1 or cost < MIN_ENTRY_PRICE or edge <= 0 or available_cash <= 0:
         return 0
 
     days_left = (market.resolution_time - datetime.now(timezone.utc)).total_seconds() / 86400
@@ -258,13 +260,19 @@ def run():
                 existing_pos = positions_by_market.get(market.market_id)
 
                 if existing_pos and float(existing_pos.shares) > 0:
-                    entry_cost = float(existing_pos.shares) * float(existing_pos.avg_entry_price)
+                    shares_held = float(existing_pos.shares)
+                    entry_cost = shares_held * float(existing_pos.avg_entry_price)
                     if entry_cost > 0:
                         pnl_pct = float(existing_pos.unrealized_pnl) / entry_cost
-                        if pnl_pct <= STOP_LOSS_PCT:
-                            sell_shares = int(float(existing_pos.shares))
-                            log.info("  STOP-LOSS SELL %s %d shares on %s (pnl=%.0f%%)",
-                                     existing_pos.side, sell_shares, market.market_id, pnl_pct * 100)
+                        # Credit back the known per-share market impact before comparing to stop-loss:
+                        # buying moves the displayed price ~1c against us, so the first 1c/share is
+                        # mechanical, not signal. Without this, a 1c entry stops out at -100% on tick 0.
+                        adjusted_pnl = float(existing_pos.unrealized_pnl) + STOP_LOSS_IMPACT_BUFFER * shares_held
+                        pnl_pct_adj = adjusted_pnl / entry_cost
+                        if pnl_pct_adj <= STOP_LOSS_PCT:
+                            sell_shares = int(shares_held)
+                            log.info("  STOP-LOSS SELL %s %d shares on %s (pnl=%.0f%%, adj=%.0f%%)",
+                                     existing_pos.side, sell_shares, market.market_id, pnl_pct * 100, pnl_pct_adj * 100)
                             intents.append(TradeIntentRequest(
                                 market_id=market.market_id,
                                 action="SELL",
